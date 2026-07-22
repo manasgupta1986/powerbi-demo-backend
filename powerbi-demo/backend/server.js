@@ -11,8 +11,7 @@ app.use(express.json({ limit: "100mb" }));
 const PORT = process.env.PORT || 3001;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 
-// IMPORTANT:
-// On Render, set DATA_DIR = /var/data
+// IMPORTANT: On Render, set DATA_DIR=/var/data
 const DATA_ROOT = process.env.DATA_DIR || path.join(__dirname, "local-data");
 const DATA_DIR = path.join(DATA_ROOT, "data");
 const REPORTS_DIR = path.join(DATA_ROOT, "reports");
@@ -24,7 +23,7 @@ const SCREENSHOTS_DIR = path.join(DATA_ROOT, "screenshots");
   }
 });
 
-// Serve saved screenshots and saved files
+// Expose saved screenshots and files
 app.use("/storage", express.static(DATA_ROOT));
 
 function readJsonSafe(filePath, fallback = null) {
@@ -50,11 +49,11 @@ function sanitizeName(value) {
 
 function escapeHtml(value) {
   return String(value || "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
 function isoStamp() {
@@ -80,35 +79,6 @@ function saveDataUrlImage(dataUrl, fileBaseName) {
     filePath,
     publicUrl: `/storage/screenshots/${fileName}`
   };
-}
-
-function fallbackSummary(run) {
-  const pages = [...new Set((run.captures || []).map(c => c.pageName).filter(Boolean))];
-  const filters = [...new Set((run.captures || []).map(c => c.filterName).filter(Boolean))];
-  const totalCaptures = (run.captures || []).length;
-
-  return `
-EXECUTIVE TAKEAWAY
-This is a saved dashboard run for ${run.clientName || "the client"} with ${totalCaptures} captures across ${pages.length} page(s). AI analysis is not active, so this is a fallback summary.
-
-BASELINE OVERALL VIEW
-Pages captured: ${pages.join(", ") || "none"}.
-
-KEY COHORT SIGNALS
-Filters captured: ${filters.join(", ") || "none"}.
-For richer insights, ensure OPENAI_API_KEY is set correctly in Render.
-
-PAGE-BY-PAGE OBSERVATIONS
-The system successfully saved dashboard states and screenshots. Review the screenshots in the report for directional comparison.
-
-RECOMMENDED ACTIONS
-1. Keep the dashboard manually set to the correct date range before running.
-2. Start with 1-2 filters first for stability.
-3. Compare baseline first, then compare filtered cohorts.
-
-CONFIDENCE / CAVEATS
-This fallback does not provide deep business interpretation. It mainly confirms that the sweep and storage worked.
-  `.trim();
 }
 
 function buildPromptFromRun(run, originalCapturesForModel = []) {
@@ -156,6 +126,7 @@ Here is the extracted capture text:
 ${captureSummary}
   `.trim();
 
+  // To control payload size, only pass a limited number of screenshots to the model
   const imageInputs = originalCapturesForModel
     .filter(c => c.screenshotDataUrl && c.screenshotDataUrl.startsWith("data:image"))
     .slice(0, 10)
@@ -184,7 +155,7 @@ async function generateInsightSummary(run, originalCapturesForModel = []) {
     messages: [
       {
         role: "system",
-        content: "You are a sharp retail and category insights analyst. Write concise, business-useful, actionable summaries from dashboard captures."
+        content: "You are a sharp retail / category insights analyst. Write concise, business-useful, actionable summaries from dashboard captures."
       },
       {
         role: "user",
@@ -216,6 +187,35 @@ async function generateInsightSummary(run, originalCapturesForModel = []) {
   const text = json?.choices?.[0]?.message?.content?.trim();
 
   return text || fallbackSummary(run);
+}
+
+function fallbackSummary(run) {
+  const pages = [...new Set((run.captures || []).map(c => c.pageName).filter(Boolean))];
+  const filters = [...new Set((run.captures || []).map(c => c.filterName).filter(Boolean))];
+  const totalCaptures = (run.captures || []).length;
+
+  return `
+EXECUTIVE TAKEAWAY
+This is a saved dashboard run for ${run.clientName || "the client"} with ${totalCaptures} captures across ${pages.length} page(s). AI analysis is not active, so this is a basic fallback summary.
+
+BASELINE OVERALL VIEW
+Pages captured: ${pages.join(", ") || "none"}.
+
+KEY COHORT SIGNALS
+Filters captured: ${filters.join(", ") || "none"}.
+For deeper business insights, ensure OPENAI_API_KEY is set in Render Environment.
+
+PAGE-BY-PAGE OBSERVATIONS
+The system successfully saved dashboard states and screenshots. Review the screenshots in the report for directional comparison.
+
+RECOMMENDED ACTIONS
+1. Keep the dashboard manually set to the correct date range before running.
+2. Use 2-3 filters first for demo stability.
+3. Review baseline before cohort cuts.
+
+CONFIDENCE / CAVEATS
+This fallback does not infer deep cohort strategy. It mainly confirms that the sweep and storage worked.
+  `.trim();
 }
 
 function buildHtmlReport(run) {
@@ -407,9 +407,11 @@ app.post("/analyze", async (req, res) => {
     const summary = await generateInsightSummary(latestRun, captures);
     latestRun.summary = summary;
 
+    // Save latest
     writeJson(path.join(DATA_DIR, "latest-run.json"), latestRun);
     fs.writeFileSync(path.join(REPORTS_DIR, "latest-report.html"), buildHtmlReport(latestRun), "utf8");
 
+    // Save history copy too
     writeJson(path.join(DATA_DIR, `run-${stamp}.json`), latestRun);
     fs.writeFileSync(path.join(REPORTS_DIR, `report-${stamp}.html`), buildHtmlReport(latestRun), "utf8");
 
