@@ -1,13 +1,20 @@
 {
   "manifest_version": 3,
   "name": "PowerBI Demo Assistant",
-  "version": "1.2.0",
-  "description": "Demo assistant for dashboard capture, saved reports, and Q&A.",
-  "permissions": ["activeTab", "storage", "tabs", "scripting", "sidePanel"],
+  "version": "2.0.0",
+  "description": "Power BI sweep + saved report side panel",
+  "permissions": [
+    "storage",
+    "tabs",
+    "scripting",
+    "activeTab",
+    "sidePanel"
+  ],
   "host_permissions": [
     "https://app.powerbi.com/*",
     "https://*.onrender.com/*",
-    "http://localhost:3001/*"
+    "http://localhost/*",
+    "http://127.0.0.1/*"
   ],
   "background": {
     "service_worker": "background.js"

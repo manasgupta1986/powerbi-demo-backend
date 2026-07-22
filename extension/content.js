@@ -2,203 +2,245 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function appendRunLog(line) {
-  const existing = await chrome.storage.local.get(['runLog']);
-  const runLog = Array.isArray(existing.runLog) ? existing.runLog : [];
-  runLog.push(`${new Date().toLocaleTimeString()} ${line}`);
-  await chrome.storage.local.set({ runLog: runLog.slice(-200) });
+function normalize(text) {
+  return String(text || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
 }
 
-async function setRunStatus(text) {
-  await chrome.storage.local.set({ runStatus: text });
-  await appendRunLog(text);
+function getElementText(el) {
+  return [
+    el.innerText,
+    el.textContent,
+    el.getAttribute && el.getAttribute("aria-label"),
+    el.getAttribute && el.getAttribute("title")
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isVisible(el) {
+  if (!el) return false;
+  const style = window.getComputedStyle(el);
+  const rect = el.getBoundingClientRect();
+
+  return (
+    style.display !== "none" &&
+    style.visibility !== "hidden" &&
+    rect.width > 0 &&
+    rect.height > 0
+  );
+}
+
+function dispatchRealClick(el) {
+  el.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
+
+  const events = ["mouseover", "mousedown", "mouseup", "click"];
+  for (const eventName of events) {
+    el.dispatchEvent(
+      new MouseEvent(eventName, {
+        view: window,
+        bubbles: true,
+        cancelable: true
+      })
+    );
+  }
+}
+
+async function logLine(line) {
+  try {
+    await chrome.runtime.sendMessage({ type: "logStatus", line });
+  } catch (err) {
+    // ignore
+  }
+}
+
+function getAllCandidates() {
+  return Array.from(
+    document.querySelectorAll(
+      'button, [role="button"], [role="tab"], [role="option"], [aria-label], span, div'
+    )
+  );
+}
+
+function findBestMatch(targetText) {
+  const target = normalize(targetText);
+  const candidates = [];
+
+  for (const el of getAllCandidates()) {
+    if (!isVisible(el)) continue;
+
+    const text = getElementText(el);
+    const textNorm = normalize(text);
+    if (!textNorm) continue;
+
+    let score = 0;
+
+    if (textNorm === target) score = 1000;
+    else if (textNorm.includes(target)) score = 700;
+    else if (target.includes(textNorm)) score = 400;
+    else continue;
+
+    if (el.getAttribute("role") === "tab") score += 50;
+    if (el.tagName === "BUTTON") score += 40;
+
+    score -= Math.abs(textNorm.length - target.length);
+
+    candidates.push({ el, text, score });
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0] || null;
+}
+
+async function clickByText(targetText, purposeLabel) {
+  const match = findBestMatch(targetText);
+
+  if (!match) {
+    await logLine(`${purposeLabel}: could not find "${targetText}"`);
+    return {
+      ok: false,
+      note: `${purposeLabel}: could not find "${targetText}"`
+    };
+  }
+
+  await logLine(`${purposeLabel}: matched "${match.text.slice(0, 120)}"`);
+
+  dispatchRealClick(match.el);
+  await sleep(1200);
+
+  return {
+    ok: true,
+    note: `${purposeLabel}: clicked "${targetText}" using "${match.text.slice(0, 120)}"`
+  };
+}
+
+function closeOpenLayer() {
+  document.body.dispatchEvent(
+    new MouseEvent("click", {
+      view: window,
+      bubbles: true,
+      cancelable: true
+    })
+  );
+}
+
+async function switchPage(pageName) {
+  await logLine(`Attempting to open page "${pageName}"`);
+
+  const result = await clickByText(pageName, "Open page");
+  await sleep(1800);
+
+  return {
+    ok: result.ok,
+    note: result.note
+  };
+}
+
+async function resetFilter(filterName, allLabel) {
+  await logLine(`Resetting filter "${filterName}" to "${allLabel}"`);
+
+  const openResult = await clickByText(filterName, "Open filter");
+  if (!openResult.ok) {
+    return {
+      ok: false,
+      note: openResult.note
+    };
+  }
+
+  await sleep(1000);
+
+  const allResult = await clickByText(allLabel, "Select all");
+  await sleep(1200);
+
+  closeOpenLayer();
+  await sleep(800);
+
+  return {
+    ok: allResult.ok,
+    note: allResult.note
+  };
+}
+
+async function applyFilterOption(filterName, optionLabel, allLabel) {
+  await logLine(`Selecting ${filterName} = ${optionLabel}`);
+
+  const openResult = await clickByText(filterName, "Open filter");
+  if (!openResult.ok) {
+    return {
+      ok: false,
+      note: openResult.note
+    };
+  }
+
+  await sleep(1000);
+
+  const optionResult = await clickByText(optionLabel, "Choose option");
+  await sleep(1500);
+
+  const visibleText = getVisibleText();
+  const verified = normalize(visibleText).includes(normalize(optionLabel));
+
+  closeOpenLayer();
+  await sleep(800);
+
+  return {
+    ok: optionResult.ok,
+    note: optionResult.ok
+      ? `Selected ${filterName} = ${optionLabel}. Verification: ${verified ? "option text visible on page" : "option text not clearly visible after click"}`
+      : optionResult.note
+  };
 }
 
 function getVisibleText() {
-  const text = (document.body?.innerText || '')
-    .replace(/\n{3,}/g, '\n\n')
-    .replace(/[ \t]{2,}/g, ' ')
-    .trim();
-  return text.slice(0, 18000);
-}
-
-function getClickableCandidates() {
-  return [...document.querySelectorAll('button, a, div, span, label')].filter(el => {
-    const text = (el.innerText || el.textContent || '').trim();
-    const style = window.getComputedStyle(el);
-    const rect = el.getBoundingClientRect();
-    return text && rect.width > 20 && rect.height > 12 && style.visibility !== 'hidden' && style.display !== 'none';
-  });
-}
-
-function scoreMatch(candidateText, target) {
-  const a = candidateText.toLowerCase();
-  const b = target.toLowerCase();
-  if (a === b) return 100;
-  if (a.includes(b)) return 80;
-  if (b.includes(a)) return 60;
-  return 0;
-}
-
-async function clickByText(targetText) {
-  const candidates = getClickableCandidates();
-  const scored = candidates
-    .map(el => ({ el, text: (el.innerText || el.textContent || '').trim(), score: scoreMatch((el.innerText || el.textContent || '').trim(), targetText) }))
-    .filter(x => x.score > 0)
-    .sort((a, b) => b.score - a.score);
-
-  if (!scored.length) return { clicked: false, matchedText: '' };
-
-  const winner = scored[0].el;
-  const matchedText = scored[0].text;
-  winner.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  await sleep(700);
-  winner.click();
-  return { clicked: true, matchedText };
-}
-
-async function tryClick(targetText, waitAfter = 2500) {
-  await setRunStatus(`Status: trying click on "${targetText}"...`);
-  try {
-    const result = await clickByText(targetText);
-    if (result.clicked) {
-      await appendRunLog(`Clicked target "${targetText}" using element text "${result.matchedText}"`);
-      await sleep(waitAfter);
-      return { clicked: true, matchedText: result.matchedText };
-    }
-  } catch (e) {
-    await appendRunLog(`Error while clicking "${targetText}": ${e.message}`);
-  }
-  await appendRunLog(`Could not find a clickable element for "${targetText}"`);
-  return { clicked: false, matchedText: '' };
-}
-
-async function selectFilterOption(filterName, optionText, waitAfter = 3000) {
-  await setRunStatus(`Status: opening filter ${filterName}...`);
-  const filterOpen = await tryClick(filterName, 1500);
-  await sleep(800);
-
-  await setRunStatus(`Status: selecting ${filterName} = ${optionText}...`);
-  const optionResult = await tryClick(optionText, waitAfter);
-
-  return {
-    filterOpenClicked: filterOpen.clicked,
-    optionClicked: optionResult.clicked,
-    matchedText: optionResult.matchedText
-  };
-}
-
-async function captureVisibleState() {
-  return await new Promise(resolve => {
-    chrome.runtime.sendMessage({ action: 'captureVisibleState' }, (response) => {
-      const err = chrome.runtime.lastError;
-      if (err) {
-        resolve({ ok: false, error: err.message });
-        return;
-      }
-      resolve(response || { ok: false, error: 'No response from background screenshot capture' });
-    });
-  });
-}
-
-async function captureSingleState(state, pageName, navigationInfo = {}) {
-  const screenshot = await captureVisibleState();
-  if (screenshot.ok) {
-    await appendRunLog(`Screenshot captured for ${state.filterName || 'Overall'}=${state.filterValue || 'All'} | ${pageName}`);
-  } else {
-    await appendRunLog(`Screenshot failed for ${state.filterName || 'Overall'}=${state.filterValue || 'All'} | ${pageName}: ${screenshot.error || 'Unknown error'}`);
-  }
-
-  return {
-    ...state,
-    pageName,
-    extractedText: getVisibleText(),
-    capturedAt: new Date().toISOString(),
-    imageDataUrl: screenshot.ok ? screenshot.imageDataUrl : '',
-    screenshotCaptured: !!screenshot.ok,
-    navigationInfo
-  };
-}
-
-async function capturePagesForState(pageNames, state) {
-  const captures = [];
-
-  if (!pageNames.length) {
-    captures.push(await captureSingleState(state, 'Current View', { pageClicked: true, matchedText: 'Current View' }));
-    return captures;
-  }
-
-  for (const pageName of pageNames) {
-    await setRunStatus(`Status: ${state.filterName} = ${state.filterValue} | opening ${pageName}...`);
-    const pageClick = await tryClick(pageName, 3200);
-
-    captures.push(await captureSingleState(state, pageName, {
-      pageClicked: pageClick.clicked,
-      matchedText: pageClick.matchedText
-    }));
-  }
-
-  return captures;
+  return String(document.body?.innerText || "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+    .slice(0, 20000);
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.action !== 'runFilterSweep') return;
-
   (async () => {
-    const pageNames = Array.isArray(message.pageNames) ? message.pageNames : [];
-    const filters = Array.isArray(message.filters) ? message.filters : [];
-    const timeFilterText = message.timeFilterText || '';
-    const captures = [];
-
-    await setRunStatus('Status: content script received the screenshot sweep request...');
-    await sleep(3500);
-
-    if (timeFilterText) {
-      await setRunStatus(`Status: trying time filter "${timeFilterText}"...`);
-      await tryClick(timeFilterText, 2500);
+    if (message?.type === "ping") {
+      sendResponse({ ok: true });
+      return;
     }
 
-    await setRunStatus('Status: capturing overall baseline across all tabs before filters...');
-    const baselineCaptures = await capturePagesForState(pageNames, {
-      filterName: 'Overall',
-      filterValue: 'All',
-      baseline: true,
-      timeFilterText
-    });
-    captures.push(...baselineCaptures);
-
-    for (const filter of filters) {
-      const filterName = filter.filterName || 'Unknown Filter';
-      const allLabel = filter.allLabel || 'All';
-      const options = Array.isArray(filter.options) ? filter.options : [];
-
-      await setRunStatus(`Status: resetting ${filterName} to ${allLabel}...`);
-      await selectFilterOption(filterName, allLabel, 2500);
-
-      for (const option of options) {
-        const selectionInfo = await selectFilterOption(filterName, option, 3000);
-
-        await setRunStatus(`Status: capturing tabs for ${filterName} = ${option}...`);
-        const stateCaptures = await capturePagesForState(pageNames, {
-          filterName,
-          filterValue: option,
-          timeFilterText,
-          selectionInfo
-        });
-
-        captures.push(...stateCaptures);
-      }
-
-      await setRunStatus(`Status: restoring ${filterName} to ${allLabel}...`);
-      await selectFilterOption(filterName, allLabel, 2500);
+    if (message?.type === "getVisibleText") {
+      sendResponse({
+        ok: true,
+        visibleText: getVisibleText()
+      });
+      return;
     }
 
-    await setRunStatus(`Status: sweep finished locally with ${captures.length} captures. Sending response...`);
-    sendResponse({ ok: true, captures });
-  })().catch(async err => {
-    await setRunStatus(`Status: content script failed. ${err.message}`);
-    sendResponse({ ok: false, error: err.message });
-  });
+    if (message?.type === "switchPage") {
+      const result = await switchPage(message.pageName);
+      sendResponse(result);
+      return;
+    }
+
+    if (message?.type === "resetFilter") {
+      const result = await resetFilter(message.filterName, message.allLabel);
+      sendResponse(result);
+      return;
+    }
+
+    if (message?.type === "applyFilterOption") {
+      const result = await applyFilterOption(
+        message.filterName,
+        message.optionLabel,
+        message.allLabel
+      );
+      sendResponse(result);
+      return;
+    }
+
+    sendResponse({ ok: false, note: "Unknown content message type." });
+  })();
 
   return true;
 });

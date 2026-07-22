@@ -1,67 +1,152 @@
-<!doctype html>
+<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8" />
   <title>PowerBI Demo Assistant</title>
   <style>
-    body { font-family: Arial, sans-serif; width: 100%; padding: 14px; background: #f8fafc; color: #111827; box-sizing: border-box; }
-    h1 { font-size: 18px; margin: 0 0 12px 0; }
-    label { display: block; font-size: 12px; font-weight: bold; margin-top: 10px; }
-    input, textarea { width: 100%; box-sizing: border-box; padding: 8px; border-radius: 10px; border: 1px solid #cbd5e1; margin-top: 4px; }
-    textarea { min-height: 72px; resize: vertical; }
-    #filterConfig { min-height: 160px; font-family: Menlo, Monaco, monospace; font-size: 12px; }
-    button { margin-top: 10px; width: 100%; border: 0; border-radius: 10px; padding: 10px; cursor: pointer; font-weight: bold; }
-    .primary { background: #2563eb; color: white; }
-    .secondary { background: #111827; color: white; }
-    .ghost { background: #e5e7eb; color: #111827; }
-    #status, #answer, #latestInfo, #runLog { white-space: pre-wrap; background: white; border-radius: 10px; padding: 10px; margin-top: 10px; border: 1px solid #e5e7eb; }
-    #status { min-height: 64px; overflow-wrap: anywhere; }
-    #runLog { min-height: 180px; max-height: 320px; overflow: auto; font-family: Menlo, Monaco, monospace; font-size: 12px; }
-    .small { color: #6b7280; font-size: 12px; }
+    body {
+      font-family: Arial, sans-serif;
+      margin: 0;
+      padding: 14px;
+      background: #f5f7fb;
+      color: #222;
+    }
+
+    h1 {
+      font-size: 18px;
+      margin: 0 0 12px 0;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      padding: 12px;
+      margin-bottom: 12px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+    }
+
+    label {
+      display: block;
+      font-size: 12px;
+      font-weight: 700;
+      margin-bottom: 4px;
+      margin-top: 10px;
+    }
+
+    input, textarea {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 8px;
+      border: 1px solid #cfd6df;
+      border-radius: 8px;
+      font-size: 13px;
+    }
+
+    textarea {
+      min-height: 120px;
+      resize: vertical;
+      font-family: Menlo, Consolas, monospace;
+    }
+
+    .btn {
+      width: 100%;
+      border: none;
+      border-radius: 10px;
+      padding: 10px 12px;
+      margin-top: 8px;
+      font-size: 13px;
+      cursor: pointer;
+      font-weight: 700;
+    }
+
+    .btnPrimary {
+      background: #1456ff;
+      color: white;
+    }
+
+    .btnSecondary {
+      background: #1c8c52;
+      color: white;
+    }
+
+    .btnNeutral {
+      background: #eceff4;
+      color: #222;
+    }
+
+    #statusBox {
+      min-height: 90px;
+      max-height: 220px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      border: 1px solid #d7dde5;
+      background: #fafbfc;
+      border-radius: 10px;
+      padding: 10px;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    #summaryBox {
+      min-height: 90px;
+      max-height: 240px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      border: 1px solid #d7dde5;
+      background: #fafbfc;
+      border-radius: 10px;
+      padding: 10px;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .small {
+      font-size: 11px;
+      color: #555;
+      margin-top: 6px;
+    }
   </style>
 </head>
 <body>
   <h1>PowerBI Demo Assistant</h1>
 
-  <label>Client name</label>
-  <input id="clientName" value="Amazon Demo" />
+  <div class="card">
+    <label for="clientName">Client name</label>
+    <input id="clientName" type="text" placeholder="Amazon Demo" />
 
-  <label>Dashboard URL</label>
-  <input id="dashboardUrl" placeholder="Paste Power BI URL here" />
+    <label for="dashboardUrl">Dashboard URL</label>
+    <input id="dashboardUrl" type="text" placeholder="https://app.powerbi.com/view?..." />
 
-  <label>Backend URL</label>
-  <input id="backendUrl" value="http://localhost:3001" placeholder="https://your-render-service.onrender.com" />
+    <label for="backendUrl">Backend URL</label>
+    <input id="backendUrl" type="text" placeholder="https://your-service.onrender.com" />
 
-  <label>Tab names, comma separated</label>
-  <input id="pageNames" value="Traffic Engagement, Purchase Matrix, Purchase Funnel" />
+    <label for="pageNames">Tab names (comma separated)</label>
+    <input id="pageNames" type="text" placeholder="Traffic Engagement, Purchase Matrix, Purchase Funnel" />
 
-  <label>Time filter text</label>
-  <input id="timeFilterText" value="" />
+    <label for="filterConfig">Filter sweep config JSON</label>
+    <textarea id="filterConfig"></textarea>
 
-  <label>Filter sweep config JSON</label>
-  <textarea id="filterConfig">[
-  {
-    "filterName": "Zone",
-    "allLabel": "All",
-    "options": ["East", "North", "South", "West"]
-  }
-]</textarea>
+    <button id="saveBtn" class="btn btnNeutral">Save settings</button>
+    <button id="loadLatestBtn" class="btn btnPrimary">Load latest saved run</button>
+    <button id="openReportBtn" class="btn btnNeutral">Open latest saved report</button>
+    <button id="runSweepBtn" class="btn btnSecondary">Run new sweep</button>
 
-  <button class="primary" id="saveSettings">Save settings</button>
-  <button class="ghost" id="loadLatest">Load latest saved run</button>
-  <button class="ghost" id="openReport">Open latest saved report</button>
-  <button class="secondary" id="runAnalysis">Run new sweep</button>
+    <div class="small">
+      Recommended first test: use only one filter with two options.
+    </div>
+  </div>
 
-  <label>Ask saved dashboard run</label>
-  <textarea id="question" placeholder="Example: Which cohort looks most important for the category lead to investigate next?"></textarea>
-  <button class="primary" id="askBtn">Ask</button>
+  <div class="card">
+    <label>Status</label>
+    <div id="statusBox">Idle</div>
+  </div>
 
-  <div id="status">Status: ready</div>
-  <div id="latestInfo">Latest saved run details will appear here.</div>
-  <label>Detailed live log</label>
-  <div id="runLog">Run log will appear here.</div>
-  <div id="answer">Answer will appear here.</div>
-  <div class="small">Recommended demo flow: run the sweep in the morning, then open this side panel in the client meeting and use Load latest saved run + Open latest saved report + Q&A.</div>
+  <div class="card">
+    <label>Latest saved summary</label>
+    <div id="summaryBox">No saved summary loaded yet.</div>
+  </div>
 
   <script src="sidepanel.js"></script>
 </body>
