@@ -9,14 +9,12 @@
       margin: 0;
       padding: 14px;
       background: #f5f7fb;
-      color: #222;
+      color: #1f2937;
     }
-
     h1 {
       font-size: 18px;
       margin: 0 0 12px 0;
     }
-
     .card {
       background: #fff;
       border-radius: 12px;
@@ -24,7 +22,6 @@
       margin-bottom: 12px;
       box-shadow: 0 2px 10px rgba(0,0,0,0.08);
     }
-
     label {
       display: block;
       font-size: 12px;
@@ -32,7 +29,6 @@
       margin-bottom: 4px;
       margin-top: 10px;
     }
-
     input, textarea {
       width: 100%;
       box-sizing: border-box;
@@ -41,13 +37,11 @@
       border-radius: 8px;
       font-size: 13px;
     }
-
     textarea {
       min-height: 120px;
       resize: vertical;
       font-family: Menlo, Consolas, monospace;
     }
-
     .btn {
       width: 100%;
       border: none;
@@ -58,37 +52,10 @@
       cursor: pointer;
       font-weight: 700;
     }
-
-    .btnPrimary {
-      background: #1456ff;
-      color: white;
-    }
-
-    .btnSecondary {
-      background: #1c8c52;
-      color: white;
-    }
-
-    .btnNeutral {
-      background: #eceff4;
-      color: #222;
-    }
-
-    #statusBox {
-      min-height: 90px;
-      max-height: 220px;
-      overflow-y: auto;
-      white-space: pre-wrap;
-      word-break: break-word;
-      border: 1px solid #d7dde5;
-      background: #fafbfc;
-      border-radius: 10px;
-      padding: 10px;
-      font-size: 12px;
-      line-height: 1.45;
-    }
-
-    #summaryBox {
+    .btnPrimary { background: #1456ff; color: white; }
+    .btnSecondary { background: #1c8c52; color: white; }
+    .btnNeutral { background: #eceff4; color: #222; }
+    #statusBox, #summaryBox {
       min-height: 90px;
       max-height: 240px;
       overflow-y: auto;
@@ -101,7 +68,37 @@
       font-size: 12px;
       line-height: 1.45;
     }
-
+    #chatMessages {
+      min-height: 180px;
+      max-height: 340px;
+      overflow-y: auto;
+      border: 1px solid #d7dde5;
+      background: #fafbfc;
+      border-radius: 10px;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .msg {
+      padding: 10px 12px;
+      border-radius: 12px;
+      max-width: 92%;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 13px;
+    }
+    .msg.user {
+      background: #1456ff;
+      color: white;
+      align-self: flex-end;
+    }
+    .msg.assistant {
+      background: #eef2f7;
+      color: #1f2937;
+      align-self: flex-start;
+    }
     .small {
       font-size: 11px;
       color: #555;
@@ -133,9 +130,7 @@
     <button id="openReportBtn" class="btn btnNeutral">Open latest saved report</button>
     <button id="runSweepBtn" class="btn btnSecondary">Run new sweep</button>
 
-    <div class="small">
-      Recommended first test: use only one filter with two options.
-    </div>
+    <div class="small">Start with one filter first. Chat answers only from extracted dashboard data.</div>
   </div>
 
   <div class="card">
@@ -144,8 +139,16 @@
   </div>
 
   <div class="card">
-    <label>Latest saved summary</label>
+    <label>Latest strategic summary</label>
     <div id="summaryBox">No saved summary loaded yet.</div>
+  </div>
+
+  <div class="card">
+    <label>Dashboard Q&A</label>
+    <div id="chatMessages"></div>
+    <label for="chatInput">Ask from captured data</label>
+    <textarea id="chatInput" placeholder="Example: Which app improved the most in the last 2 visible weeks?"></textarea>
+    <button id="sendChatBtn" class="btn btnPrimary">Send</button>
   </div>
 
   <script src="sidepanel.js"></script>

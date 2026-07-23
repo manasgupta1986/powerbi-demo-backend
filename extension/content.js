@@ -60,9 +60,7 @@ async function logLine(line) {
 
 function getAllCandidates() {
   return Array.from(
-    document.querySelectorAll(
-      'button, [role="button"], [role="tab"], [role="option"], [aria-label], span, div'
-    )
+    document.querySelectorAll('button, [role="button"], [role="tab"], [role="option"], [aria-label], span, div')
   );
 }
 
@@ -88,7 +86,6 @@ function findBestMatch(targetText) {
     if (el.tagName === "BUTTON") score += 40;
 
     score -= Math.abs(textNorm.length - target.length);
-
     candidates.push({ el, text, score });
   }
 
@@ -101,20 +98,16 @@ async function clickByText(targetText, purposeLabel) {
 
   if (!match) {
     await logLine(`${purposeLabel}: could not find "${targetText}"`);
-    return {
-      ok: false,
-      note: `${purposeLabel}: could not find "${targetText}"`
-    };
+    return { ok: false, note: `${purposeLabel}: could not find "${targetText}"` };
   }
 
-  await logLine(`${purposeLabel}: matched "${match.text.slice(0, 120)}"`);
-
+  await logLine(`${purposeLabel}: matched "${match.text.slice(0, 150)}"`);
   dispatchRealClick(match.el);
   await sleep(1200);
 
   return {
     ok: true,
-    note: `${purposeLabel}: clicked "${targetText}" using "${match.text.slice(0, 120)}"`
+    note: `${purposeLabel}: clicked "${targetText}" using "${match.text.slice(0, 150)}"`
   };
 }
 
@@ -130,26 +123,16 @@ function closeOpenLayer() {
 
 async function switchPage(pageName) {
   await logLine(`Attempting to open page "${pageName}"`);
-
   const result = await clickByText(pageName, "Open page");
   await sleep(1800);
-
-  return {
-    ok: result.ok,
-    note: result.note
-  };
+  return { ok: result.ok, note: result.note };
 }
 
 async function resetFilter(filterName, allLabel) {
   await logLine(`Resetting filter "${filterName}" to "${allLabel}"`);
 
   const openResult = await clickByText(filterName, "Open filter");
-  if (!openResult.ok) {
-    return {
-      ok: false,
-      note: openResult.note
-    };
-  }
+  if (!openResult.ok) return { ok: false, note: openResult.note };
 
   await sleep(1000);
 
@@ -159,22 +142,14 @@ async function resetFilter(filterName, allLabel) {
   closeOpenLayer();
   await sleep(800);
 
-  return {
-    ok: allResult.ok,
-    note: allResult.note
-  };
+  return { ok: allResult.ok, note: allResult.note };
 }
 
 async function applyFilterOption(filterName, optionLabel, allLabel) {
   await logLine(`Selecting ${filterName} = ${optionLabel}`);
 
   const openResult = await clickByText(filterName, "Open filter");
-  if (!openResult.ok) {
-    return {
-      ok: false,
-      note: openResult.note
-    };
-  }
+  if (!openResult.ok) return { ok: false, note: openResult.note };
 
   await sleep(1000);
 
@@ -199,7 +174,7 @@ function getVisibleText() {
   return String(document.body?.innerText || "")
     .replace(/\n{3,}/g, "\n\n")
     .trim()
-    .slice(0, 20000);
+    .slice(0, 25000);
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -210,32 +185,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     if (message?.type === "getVisibleText") {
-      sendResponse({
-        ok: true,
-        visibleText: getVisibleText()
-      });
+      sendResponse({ ok: true, visibleText: getVisibleText() });
       return;
     }
 
     if (message?.type === "switchPage") {
-      const result = await switchPage(message.pageName);
-      sendResponse(result);
+      sendResponse(await switchPage(message.pageName));
       return;
     }
 
     if (message?.type === "resetFilter") {
-      const result = await resetFilter(message.filterName, message.allLabel);
-      sendResponse(result);
+      sendResponse(await resetFilter(message.filterName, message.allLabel));
       return;
     }
 
     if (message?.type === "applyFilterOption") {
-      const result = await applyFilterOption(
-        message.filterName,
-        message.optionLabel,
-        message.allLabel
-      );
-      sendResponse(result);
+      sendResponse(await applyFilterOption(message.filterName, message.optionLabel, message.allLabel));
       return;
     }
 

@@ -1,7 +1,7 @@
 {
   "name": "powerbi-demo-backend",
-  "version": "1.0.0",
-  "description": "Backend for Power BI demo automation",
+  "version": "2.1.0",
+  "description": "Backend for Power BI screenshot analysis and chat",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {

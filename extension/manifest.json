@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "PowerBI Demo Assistant",
-  "version": "2.0.0",
-  "description": "Power BI sweep + saved report side panel",
+  "version": "2.1.0",
+  "description": "Power BI screenshot capture, strategic report, and closed-book chat",
   "permissions": [
     "storage",
     "tabs",
@@ -11,6 +11,7 @@
     "sidePanel"
   ],
   "host_permissions": [
+    "<all_urls>",
     "https://app.powerbi.com/*",
     "https://*.onrender.com/*",
     "http://localhost/*",
