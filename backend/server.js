@@ -6,7 +6,7 @@ const path = require("path");
 const app = express();
 app.set("trust proxy", true);
 app.use(cors());
-app.use(express.json({ limit: "120mb" }));
+app.use(express.json({ limit: "150mb" }));
 
 const PORT = process.env.PORT || 3001;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
@@ -141,20 +141,72 @@ async function callOpenAI(messages, temperature = 0.2) {
   return json?.choices?.[0]?.message?.content?.trim() || "";
 }
 
+async function locateUiElements(screenshotDataUrl, labels, viewport) {
+  if (!OPENAI_API_KEY) {
+    return {
+      targets: [],
+      notes: ["OPENAI_API_KEY not set"]
+    };
+  }
+  if (!screenshotDataUrl || !Array.isArray(labels) || labels.length === 0) {
+    return { targets: [], notes: ["Missing screenshot or labels"] };
+  }
+
+  const prompt = `You are a UI element locator for a Power BI report screenshot.
+Return STRICT JSON only, no prose.
+
+Viewport size in CSS pixels (matches what a page click uses):
+- width: ${viewport?.width || "unknown"}
+- height: ${viewport?.height || "unknown"}
+- deviceScaleFactor: ${viewport?.deviceScaleFactor || 1}
+
+For each requested label, return the center pixel coordinate INSIDE the screenshot image.
+If the label is not visible, return null for x and y and confidence 0.
+
+Requested labels:
+${labels.map((l, i) => `${i + 1}. "${l}"`).join("\n")}
+
+Output exactly:
+{
+  "image_width": <number>,
+  "image_height": <number>,
+  "targets": [
+    {
+      "label": "<exact label from list>",
+      "x": <number|null>,
+      "y": <number|null>,
+      "confidence": <0..1>,
+      "notes": "<short reason>"
+    }
+  ]
+}`;
+
+  const response = await callOpenAI([
+    {
+      role: "system",
+      content: "You precisely locate small UI elements in dashboard screenshots and return coordinates."
+    },
+    {
+      role: "user",
+      content: [
+        { type: "text", text: prompt },
+        { type: "image_url", image_url: { url: screenshotDataUrl } }
+      ]
+    }
+  ], 0);
+
+  const parsed = extractJsonObject(response);
+  if (!parsed || !Array.isArray(parsed.targets)) {
+    return { targets: [], notes: ["Vision response could not be parsed"] };
+  }
+
+  return parsed;
+}
+
 async function extractChartsFromCapture(capture) {
   const prompt = `You are a chart-data extraction engine. Use ONLY the screenshot and the provided visible text. Do not use outside knowledge.
 
-Your task:
-1. Identify every visible graph/chart on this screenshot.
-2. For each chart, identify what the chart is about.
-3. Read the x-axis labels and y-axis scale/unit if visible.
-4. Estimate numeric values for each visible app/series for each visible x-axis point.
-5. Approximate values are allowed, but keep them grounded in the chart.
-6. If a value is not inferable, omit that point instead of inventing.
-7. If x-axis contains week labels like 2026-W1, keep them exactly as seen in x_label.
-8. Output STRICT JSON only.
-
-Return this exact JSON shape:
+Return STRICT JSON only:
 {
   "capture_context": {
     "page_name": "${capture.pageName || ""}",
@@ -175,12 +227,7 @@ Return this exact JSON shape:
         {
           "app_name": "",
           "points": [
-            {
-              "x_label": "2026-W1",
-              "approx_value": 12.3,
-              "unit": "%",
-              "week_start_date": null
-            }
+            { "x_label": "", "approx_value": 0, "unit": "", "week_start_date": null }
           ]
         }
       ],
@@ -193,10 +240,7 @@ Return this exact JSON shape:
 Visible text extracted from the page:
 ${(capture.visibleText || "").slice(0, 12000)}`;
 
-  const content = [
-    { type: "text", text: prompt }
-  ];
-
+  const content = [{ type: "text", text: prompt }];
   if (capture.screenshotDataUrl) {
     content.push({
       type: "image_url",
@@ -205,14 +249,8 @@ ${(capture.visibleText || "").slice(0, 12000)}`;
   }
 
   const resultText = await callOpenAI([
-    {
-      role: "system",
-      content: "You extract structured chart data from screenshots. Always return valid JSON only."
-    },
-    {
-      role: "user",
-      content
-    }
+    { role: "system", content: "You extract structured chart data from screenshots. Always return valid JSON only." },
+    { role: "user", content }
   ], 0.1);
 
   const parsed = extractJsonObject(resultText);
@@ -228,7 +266,6 @@ ${(capture.visibleText || "").slice(0, 12000)}`;
       capture_notes: ["Chart extraction failed to parse as JSON."]
     };
   }
-
   return parsed;
 }
 
@@ -238,16 +275,19 @@ function fallbackSummary(run) {
 
   return `
 EXECUTIVE TAKEAWAY
-This saved run for ${run.clientName || "the client"} contains ${chartCount} extracted chart(s) across ${pages.length} page(s). AI strategic analysis is not active, so this is a fallback summary.
+Saved run for ${run.clientName || "the client"}: ${chartCount} extracted chart(s) across ${pages.length} page(s). AI strategic analysis is not active.
 
 NUMERIC HIGHLIGHTS
-Structured chart extraction was saved, but no AI-generated numeric interpretation is available because OPENAI_API_KEY is missing or failed.
+No AI-generated numeric interpretation is available in fallback mode.
 
 WHAT IMPROVED
-Review the extracted chart tables in the report to inspect week-by-week movements.
+Review extracted chart tables in the report.
 
 WHAT WEAKENED
-Review the extracted chart tables in the report to inspect dips or declines.
+Review extracted chart tables in the report.
+
+COMPETITIVE WATCHOUTS
+Not available in fallback mode.
 
 SUGGESTED ACTIONS
 1. Confirm OPENAI_API_KEY is present in Render.
@@ -255,7 +295,7 @@ SUGGESTED ACTIONS
 3. Run with a small filter set first for stable chart extraction.
 
 CAVEATS
-This fallback is storage-first, not strategy-first. It saves the chart evidence but does not generate the richer narrative.`.trim();
+This fallback is storage-first, not strategy-first.`.trim();
 }
 
 async function buildStrategicSummary(run) {
@@ -273,15 +313,14 @@ async function buildStrategicSummary(run) {
   const prompt = `You are preparing a strategic weekly dashboard report for ${run.clientName || "the client"}'s insights and category lead.
 
 Rules:
-1. Use ONLY the dataset below. Do not use outside facts, assumptions, campaigns, or market knowledge.
-2. Be numeric. Instead of saying "grew", say "grew by approx. X%" or "rose by approx. X points" whenever the dataset supports it.
-3. Focus on the recent weekly trend visible in the extracted chart points.
-4. Do NOT summarise each graph one by one mechanically. Synthesize across charts.
-5. Write from the client's point of view. If the client's app/series appears in the data, focus on its improvements, dips, and competitive position.
-6. If a number is approximate, say "approx.".
+1. Use ONLY the dataset below.
+2. Be numeric: say "grew by approx. X%" or "declined by approx. X points" whenever supported.
+3. Focus on recent weekly trends.
+4. Synthesize across charts, do not narrate each chart mechanically.
+5. Write from the client's viewpoint.
+6. Mark approximate numbers with "approx.".
 7. If the data is too weak for a conclusion, say so.
-8. Keep the analysis purely data-derived.
-9. Use this section structure exactly:
+8. Structure:
 
 EXECUTIVE TAKEAWAY
 NUMERIC HIGHLIGHTS
@@ -296,16 +335,9 @@ ${JSON.stringify(dataset).slice(0, 120000)}`;
 
   try {
     const resultText = await callOpenAI([
-      {
-        role: "system",
-        content: "You are a rigorous retail and app performance analyst. You only use provided data."
-      },
-      {
-        role: "user",
-        content: prompt
-      }
+      { role: "system", content: "You are a rigorous retail/app analyst. You only use provided data." },
+      { role: "user", content: prompt }
     ], 0.2);
-
     return resultText || fallbackSummary(run);
   } catch (err) {
     console.error("Summary error", err.message);
@@ -332,20 +364,10 @@ function buildHtmlReport(run) {
           <div class="seriesBox">
             <h5>${escapeHtml(series.app_name || "Unknown series")}</h5>
             <table>
-              <thead>
-                <tr>
-                  <th>X label</th>
-                  <th>Week start</th>
-                  <th>Approx value</th>
-                  <th>Unit</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${rows || `<tr><td colspan="4">No points extracted</td></tr>`}
-              </tbody>
+              <thead><tr><th>X label</th><th>Week start</th><th>Approx value</th><th>Unit</th></tr></thead>
+              <tbody>${rows || `<tr><td colspan="4">No points extracted</td></tr>`}</tbody>
             </table>
-          </div>
-        `;
+          </div>`;
       }).join("");
 
       return `
@@ -361,16 +383,14 @@ function buildHtmlReport(run) {
           </div>
           <div class="notes"><strong>Notes:</strong> ${escapeHtml((chart.notes || []).join(" | "))}</div>
           ${seriesHtml || `<div class="notes">No chart series extracted.</div>`}
-        </div>
-      `;
+        </div>`;
     }).join("");
 
     return `
       <section class="captureSection">
         <h3>Capture ${captureIndex + 1}: ${escapeHtml(capture.capture_context?.page_name || "Unnamed page")}</h3>
         ${chartsHtml || `<div class="notes">No charts extracted from this screenshot.</div>`}
-      </section>
-    `;
+      </section>`;
   }).join("");
 
   const screenshotHtml = (run.captures || []).map((capture) => `
@@ -381,8 +401,7 @@ function buildHtmlReport(run) {
         ${escapeHtml(capture.verificationNote || "")}
       </div>
       ${capture.screenshotUrl ? `<img src="${capture.screenshotUrl}" alt="capture">` : ""}
-    </div>
-  `).join("");
+    </div>`).join("");
 
   return `
 <!DOCTYPE html>
@@ -416,17 +435,14 @@ function buildHtmlReport(run) {
     <div><strong>Dashboard URL:</strong> ${escapeHtml(run.dashboardUrl || "")}</div>
     <div><strong>Pages:</strong> ${escapeHtml((run.pages || []).join(", "))}</div>
   </div>
-
   <div class="box">
     <h2>Strategic Summary</h2>
     <div class="summaryText">${summaryHtml}</div>
   </div>
-
   <div class="box">
     <h2>Extracted Chart Dataset</h2>
     ${extractionHtml || "<p>No chart extraction available.</p>"}
   </div>
-
   <div class="box">
     <h2>Source Screenshots</h2>
     <div class="twoCol">
@@ -434,8 +450,7 @@ function buildHtmlReport(run) {
     </div>
   </div>
 </body>
-</html>
-  `.trim();
+</html>`.trim();
 }
 
 app.get("/health", (req, res) => {
@@ -444,22 +459,27 @@ app.get("/health", (req, res) => {
 
 app.get("/latest-data", (req, res) => {
   const file = path.join(DATA_DIR, "latest-run.json");
-  if (!fs.existsSync(file)) {
-    return res.status(404).json({ ok: false, error: "No saved run found yet." });
-  }
+  if (!fs.existsSync(file)) return res.status(404).json({ ok: false, error: "No saved run found yet." });
   const json = readJsonSafe(file, null);
-  if (!json) {
-    return res.status(500).json({ ok: false, error: "Saved run exists but could not be read." });
-  }
+  if (!json) return res.status(500).json({ ok: false, error: "Saved run exists but could not be read." });
   res.json({ ok: true, data: json });
 });
 
 app.get("/latest-report", (req, res) => {
   const file = path.join(REPORTS_DIR, "latest-report.html");
-  if (!fs.existsSync(file)) {
-    return res.status(404).send("No saved report found yet.");
-  }
+  if (!fs.existsSync(file)) return res.status(404).send("No saved report found yet.");
   res.sendFile(file);
+});
+
+app.post("/find-ui", async (req, res) => {
+  try {
+    const { screenshotDataUrl, labels, viewport } = req.body || {};
+    const result = await locateUiElements(screenshotDataUrl, labels, viewport);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error("Find UI error", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 app.post("/analyze", async (req, res) => {
@@ -559,14 +579,12 @@ app.post("/ask", async (req, res) => {
     }
 
     const latestRun = readJsonSafe(path.join(DATA_DIR, "latest-run.json"), null);
-    if (!latestRun) {
-      return res.status(404).json({ ok: false, error: "No saved run found yet." });
-    }
+    if (!latestRun) return res.status(404).json({ ok: false, error: "No saved run found yet." });
 
     if (!OPENAI_API_KEY) {
       return res.json({
         ok: true,
-        answer: "Closed-book chat is configured, but OPENAI_API_KEY is missing on the backend. Add the API key in Render to enable chat answers from the extracted dashboard dataset."
+        answer: "Closed-book chat is configured, but OPENAI_API_KEY is missing. Add it in Render to enable answers."
       });
     }
 
@@ -574,38 +592,24 @@ app.post("/ask", async (req, res) => {
       ? history.slice(-8).map((m) => `${m.role}: ${m.content}`).join("\n")
       : "";
 
-    const prompt = `You are answering questions only from the extracted dashboard dataset below.
+    const prompt = `Answer only from the dataset below.
+Rules: no outside knowledge. If not supported, say so. If asked to check online, say it is not enabled here. Use approximate numbers when available.
 
-Rules:
-1. Use only the provided dataset and summary.
-2. Do not use outside knowledge.
-3. If the answer is not supported by the dataset, say that the data captured does not show it clearly.
-4. If the user explicitly asks to check online, say that online lookup is not enabled in this backend build.
-5. Answer in a concise, chat-style format.
-6. When possible, use approximate numeric values from the extracted chart data.
-
-Client name: ${latestRun.clientName || ""}
-Strategic summary:
+Client: ${latestRun.clientName || ""}
+Summary:
 ${latestRun.summary || ""}
 
-Extracted chart dataset:
+Extracted dataset:
 ${JSON.stringify(latestRun.chartExtractions).slice(0, 120000)}
 
-Recent chat history:
+Recent chat:
 ${historyText}
 
-User question:
-${question}`;
+User: ${question}`;
 
     const answer = await callOpenAI([
-      {
-        role: "system",
-        content: "You are a disciplined dashboard QA assistant grounded only in supplied data."
-      },
-      {
-        role: "user",
-        content: prompt
-      }
+      { role: "system", content: "You are a disciplined dashboard QA assistant grounded only in supplied data." },
+      { role: "user", content: prompt }
     ], 0.2);
 
     res.json({ ok: true, answer });

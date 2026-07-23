@@ -1,211 +1,165 @@
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+let cachedMainScrollTarget = null;
 
-function normalize(text) {
-  return String(text || "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-}
-
-function getElementText(el) {
-  return [
-    el.innerText,
-    el.textContent,
-    el.getAttribute && el.getAttribute("aria-label"),
-    el.getAttribute && el.getAttribute("title")
-  ]
-    .filter(Boolean)
-    .join(" ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function isVisible(el) {
   if (!el) return false;
   const style = window.getComputedStyle(el);
   const rect = el.getBoundingClientRect();
-
-  return (
-    style.display !== "none" &&
-    style.visibility !== "hidden" &&
-    rect.width > 0 &&
-    rect.height > 0
-  );
+  return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
 }
 
-function dispatchRealClick(el) {
-  el.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
+function isScrollableElement(el) {
+  if (!el || !(el instanceof Element)) return false;
+  const style = window.getComputedStyle(el);
+  const canByStyle = ["auto", "scroll", "overlay"].includes(style.overflowY);
+  const canBySize = el.scrollHeight > el.clientHeight + 40;
+  return isVisible(el) && el.clientHeight > 80 && canByStyle && canBySize;
+}
 
-  const events = ["mouseover", "mousedown", "mouseup", "click"];
-  for (const eventName of events) {
-    el.dispatchEvent(
-      new MouseEvent(eventName, {
-        view: window,
-        bubbles: true,
-        cancelable: true
-      })
-    );
+function isDocumentScroller(t) {
+  return t === window || t === document || t === document.documentElement || t === document.body || t === document.scrollingElement;
+}
+
+function resetCachedMainScrollTarget() { cachedMainScrollTarget = null; }
+
+function getStableMainScrollTarget(force = false) {
+  if (!force && cachedMainScrollTarget && document.contains(cachedMainScrollTarget) && isScrollableElement(cachedMainScrollTarget)) {
+    return cachedMainScrollTarget;
   }
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const all = Array.from(document.querySelectorAll("*")).filter(isScrollableElement);
+  const scored = [];
+  for (const el of all) {
+    const rect = el.getBoundingClientRect();
+    if (rect.width < Math.max(320, vw * 0.45)) continue;
+    if (rect.height < Math.max(220, vh * 0.4)) continue;
+    let score = rect.width * rect.height / 1000;
+    score += (el.scrollHeight - el.clientHeight) / 4;
+    const cx = rect.left + rect.width / 2;
+    score -= Math.abs(cx - vw / 2);
+    if (rect.top >= 80 && rect.top <= 260) score += 160;
+    scored.push({ el, score });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  cachedMainScrollTarget = scored[0]?.el || document.scrollingElement || document.documentElement || document.body;
+  return cachedMainScrollTarget;
+}
+
+function readScrollMetrics(t) {
+  if (isDocumentScroller(t)) {
+    const se = document.scrollingElement || document.documentElement || document.body;
+    const y = Math.round(window.scrollY || se.scrollTop || 0);
+    const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+    const dh = Math.max(document.body?.scrollHeight || 0, document.documentElement?.scrollHeight || 0, se?.scrollHeight || 0);
+    return { scrollY: y, viewportHeight: vh, documentHeight: dh, atBottom: y + vh >= dh - 8 };
+  }
+  return { scrollY: Math.round(t.scrollTop), viewportHeight: Math.round(t.clientHeight), documentHeight: Math.round(t.scrollHeight), atBottom: t.scrollTop + t.clientHeight >= t.scrollHeight - 8 };
+}
+
+function setScrollTop(t, top) {
+  if (isDocumentScroller(t)) window.scrollTo({ top, left: 0, behavior: "instant" });
+  else t.scrollTop = top;
+}
+
+async function scrollToTop() {
+  const t = getStableMainScrollTarget(true);
+  setScrollTop(t, 0);
+  await sleep(1000);
+  const m = readScrollMetrics(t);
+  await logLine(`Scrolled main container to top. Y=${m.scrollY}, doc=${m.documentHeight}, viewport=${m.viewportHeight}`);
+  return { ok: true, ...m };
+}
+
+async function scrollDownOne() {
+  const t = getStableMainScrollTarget(false);
+  const before = readScrollMetrics(t);
+  const step = Math.max(300, Math.floor(before.viewportHeight * 0.75));
+  setScrollTop(t, before.scrollY + step);
+  await sleep(1000);
+  const after = readScrollMetrics(t);
+  await logLine(`Scrolled main container. Y ${before.scrollY} -> ${after.scrollY}`);
+  return { ok: true, before, after };
+}
+
+function getScrollMetrics() {
+  return readScrollMetrics(getStableMainScrollTarget(false));
 }
 
 async function logLine(line) {
-  try {
-    await chrome.runtime.sendMessage({ type: "logStatus", line });
-  } catch (err) {
-    // ignore
-  }
+  try { await chrome.runtime.sendMessage({ type: "logStatus", line }); } catch (e) {}
 }
 
-function getAllCandidates() {
-  return Array.from(
-    document.querySelectorAll('button, [role="button"], [role="tab"], [role="option"], [aria-label], span, div')
-  );
+function elementAtCssPoint(x, y) {
+  return document.elementFromPoint(x, y);
 }
 
-function findBestMatch(targetText) {
-  const target = normalize(targetText);
-  const candidates = [];
+function dispatchAtPoint(x, y) {
+  const el = elementAtCssPoint(x, y);
+  if (!el) return { ok: false, note: `No element at (${x},${y})` };
 
-  for (const el of getAllCandidates()) {
-    if (!isVisible(el)) continue;
-
-    const text = getElementText(el);
-    const textNorm = normalize(text);
-    if (!textNorm) continue;
-
-    let score = 0;
-
-    if (textNorm === target) score = 1000;
-    else if (textNorm.includes(target)) score = 700;
-    else if (target.includes(textNorm)) score = 400;
-    else continue;
-
-    if (el.getAttribute("role") === "tab") score += 50;
-    if (el.tagName === "BUTTON") score += 40;
-
-    score -= Math.abs(textNorm.length - target.length);
-    candidates.push({ el, text, score });
+  const eventNames = ["mouseover", "mousedown", "mouseup", "click"];
+  for (const name of eventNames) {
+    el.dispatchEvent(new MouseEvent(name, {
+      view: window, bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0
+    }));
   }
-
-  candidates.sort((a, b) => b.score - a.score);
-  return candidates[0] || null;
+  return { ok: true, note: `Clicked at (${x},${y}) tag=${el.tagName}` };
 }
 
-async function clickByText(targetText, purposeLabel) {
-  const match = findBestMatch(targetText);
+async function clickAtCssPoint(x, y) {
+  await logLine(`Vision click at (${x}, ${y})`);
+  const res = dispatchAtPoint(x, y);
+  await sleep(1000);
+  return res;
+}
 
-  if (!match) {
-    await logLine(`${purposeLabel}: could not find "${targetText}"`);
-    return { ok: false, note: `${purposeLabel}: could not find "${targetText}"` };
-  }
-
-  await logLine(`${purposeLabel}: matched "${match.text.slice(0, 150)}"`);
-  dispatchRealClick(match.el);
-  await sleep(1200);
-
+function getViewportInfo() {
   return {
     ok: true,
-    note: `${purposeLabel}: clicked "${targetText}" using "${match.text.slice(0, 150)}"`
+    width: window.innerWidth,
+    height: window.innerHeight,
+    devicePixelRatio: window.devicePixelRatio || 1
   };
 }
 
-function closeOpenLayer() {
-  document.body.dispatchEvent(
-    new MouseEvent("click", {
-      view: window,
-      bubbles: true,
-      cancelable: true
-    })
-  );
+function findDropdownScrollableAtPoint(x, y) {
+  const el = elementAtCssPoint(x, y);
+  if (!el) return null;
+  let current = el;
+  for (let i = 0; i < 8 && current; i += 1) {
+    if (isScrollableElement(current)) return current;
+    current = current.parentElement;
+  }
+  return null;
 }
 
-async function switchPage(pageName) {
-  await logLine(`Attempting to open page "${pageName}"`);
-  const result = await clickByText(pageName, "Open page");
-  await sleep(1800);
-  return { ok: result.ok, note: result.note };
-}
-
-async function resetFilter(filterName, allLabel) {
-  await logLine(`Resetting filter "${filterName}" to "${allLabel}"`);
-
-  const openResult = await clickByText(filterName, "Open filter");
-  if (!openResult.ok) return { ok: false, note: openResult.note };
-
-  await sleep(1000);
-
-  const allResult = await clickByText(allLabel, "Select all");
-  await sleep(1200);
-
-  closeOpenLayer();
-  await sleep(800);
-
-  return { ok: allResult.ok, note: allResult.note };
-}
-
-async function applyFilterOption(filterName, optionLabel, allLabel) {
-  await logLine(`Selecting ${filterName} = ${optionLabel}`);
-
-  const openResult = await clickByText(filterName, "Open filter");
-  if (!openResult.ok) return { ok: false, note: openResult.note };
-
-  await sleep(1000);
-
-  const optionResult = await clickByText(optionLabel, "Choose option");
-  await sleep(1500);
-
-  const visibleText = getVisibleText();
-  const verified = normalize(visibleText).includes(normalize(optionLabel));
-
-  closeOpenLayer();
-  await sleep(800);
-
-  return {
-    ok: optionResult.ok,
-    note: optionResult.ok
-      ? `Selected ${filterName} = ${optionLabel}. Verification: ${verified ? "option text visible on page" : "option text not clearly visible after click"}`
-      : optionResult.note
-  };
+async function scrollDropdownAtPoint(x, y, step = 100) {
+  const target = findDropdownScrollableAtPoint(x, y);
+  if (!target) return { ok: false, note: "No scrollable dropdown at that point" };
+  const before = target.scrollTop;
+  target.scrollTop = before + step;
+  await sleep(600);
+  const after = target.scrollTop;
+  await logLine(`Dropdown scroll at (${x},${y}): ${before} -> ${after}`);
+  return { ok: after !== before, before, after };
 }
 
 function getVisibleText() {
-  return String(document.body?.innerText || "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim()
-    .slice(0, 25000);
+  return String(document.body?.innerText || "").replace(/\n{3,}/g, "\n\n").trim().slice(0, 30000);
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
-    if (message?.type === "ping") {
-      sendResponse({ ok: true });
-      return;
-    }
-
-    if (message?.type === "getVisibleText") {
-      sendResponse({ ok: true, visibleText: getVisibleText() });
-      return;
-    }
-
-    if (message?.type === "switchPage") {
-      sendResponse(await switchPage(message.pageName));
-      return;
-    }
-
-    if (message?.type === "resetFilter") {
-      sendResponse(await resetFilter(message.filterName, message.allLabel));
-      return;
-    }
-
-    if (message?.type === "applyFilterOption") {
-      sendResponse(await applyFilterOption(message.filterName, message.optionLabel, message.allLabel));
-      return;
-    }
-
+    if (message?.type === "ping") { sendResponse({ ok: true }); return; }
+    if (message?.type === "getVisibleText") { sendResponse({ ok: true, visibleText: getVisibleText() }); return; }
+    if (message?.type === "getViewportInfo") { sendResponse(getViewportInfo()); return; }
+    if (message?.type === "scrollToTop") { sendResponse(await scrollToTop()); return; }
+    if (message?.type === "scrollDownOneStep") { sendResponse(await scrollDownOne()); return; }
+    if (message?.type === "getScrollMetrics") { sendResponse({ ok: true, ...getScrollMetrics() }); return; }
+    if (message?.type === "clickAtPoint") { sendResponse(await clickAtCssPoint(message.x, message.y)); return; }
+    if (message?.type === "scrollDropdownAtPoint") { sendResponse(await scrollDropdownAtPoint(message.x, message.y, message.step)); return; }
     sendResponse({ ok: false, note: "Unknown content message type." });
   })();
-
   return true;
 });
