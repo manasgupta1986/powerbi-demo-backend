@@ -7,6 +7,7 @@ const STORAGE_KEYS = {
 
 let captureInProgress = false;
 let captureWatchdog = null;
+let keepAliveTimer = null;
 
 chrome.runtime.onInstalled.addListener(() => {
   try {
@@ -23,14 +24,24 @@ chrome.action.onClicked.addListener(async (tab) => {
   } catch (err) { console.warn("Could not open side panel:", err); }
 });
 
+function startKeepAlive() {
+  stopKeepAlive();
+  keepAliveTimer = setInterval(() => {
+    chrome.runtime.getPlatformInfo(() => {});
+  }, 20000);
+}
+function stopKeepAlive() {
+  if (keepAliveTimer) { clearInterval(keepAliveTimer); keepAliveTimer = null; }
+}
+
 function startCaptureWatchdog() {
   clearCaptureWatchdog();
   captureWatchdog = setTimeout(async () => {
     captureInProgress = false;
+    stopKeepAlive();
     await addStatus("Capture lock auto-released after timeout.", "warn");
-  }, 3 * 60 * 1000);
+  }, 5 * 60 * 1000);
 }
-
 function clearCaptureWatchdog() {
   if (captureWatchdog) { clearTimeout(captureWatchdog); captureWatchdog = null; }
 }
@@ -99,7 +110,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse(result); return;
         }
         case "MODE_B_RESET_CAPTURE_LOCK": {
-          captureInProgress = false; clearCaptureWatchdog();
+          captureInProgress = false;
+          clearCaptureWatchdog();
+          stopKeepAlive();
           await addStatus("Capture lock manually reset.", "warn");
           sendResponse({ ok: true }); return;
         }
@@ -124,6 +137,7 @@ async function captureCurrentGuidedStep(isRetry) {
 
   captureInProgress = true;
   startCaptureWatchdog();
+  startKeepAlive();
 
   try {
     step.status = "in_progress"; step.startedAt = new Date().toISOString();
@@ -137,8 +151,8 @@ async function captureCurrentGuidedStep(isRetry) {
     const tab = await getActivePowerBITab();
     if (!tab?.id) {
       step.status = "failed"; step.failedAt = new Date().toISOString();
-      await saveActiveRun(run); await failProgress("No active Power BI tab found.");
-      return { ok: false, error: "No active Power BI tab found." };
+      await saveActiveRun(run); await failProgress("No Power BI dashboard tab is open. Open the Power BI dashboard tab in this window and try again.");
+      return { ok: false, error: "No Power BI dashboard tab is open. Open the Power BI dashboard tab in this window and try again." };
     }
 
     const captureResult = await captureFullStateFromActiveTab(tab.id);
@@ -149,24 +163,19 @@ async function captureCurrentGuidedStep(isRetry) {
     }
 
     const stateId = `state_${Date.now()}`;
-    const statePayload = {
+    const meta = {
       runId: run.runId, stateId, stepId: step.stepId,
       clientName: run.clientName, dashboardUrl: run.dashboardUrl,
       pageName: step.pageName, stateType: step.stateType,
       filterName: step.filterName || "", filterValue: step.filterValue || "",
-      capturedAt: new Date().toISOString(), slices: captureResult.slices
+      capturedAt: new Date().toISOString()
     };
 
-    await setProgress({
-      phase: "uploading", captureProgress: 100, uploadProgress: 5, extractionProgress: 0,
-      message: `Uploading ${captureResult.slices.length} slices`, runId: run.runId, stateId
-    });
-
-    const postResult = await postCaptureState(run.backendUrl, statePayload);
-    if (!postResult.ok) {
+    const uploadResult = await uploadSlicesInChunks(run.backendUrl, meta, captureResult.slices);
+    if (!uploadResult.ok) {
       step.status = "failed"; step.failedAt = new Date().toISOString();
-      await saveActiveRun(run); await failProgress(postResult.error);
-      return { ok: false, error: postResult.error };
+      await saveActiveRun(run); await failProgress(uploadResult.error);
+      return { ok: false, error: uploadResult.error };
     }
 
     step.status = "completed"; step.completedAt = new Date().toISOString();
@@ -191,6 +200,7 @@ async function captureCurrentGuidedStep(isRetry) {
   } finally {
     captureInProgress = false;
     clearCaptureWatchdog();
+    stopKeepAlive();
   }
 }
 
@@ -200,6 +210,7 @@ async function captureManualState(payload) {
 
   captureInProgress = true;
   startCaptureWatchdog();
+  startKeepAlive();
 
   try {
     await addStatus(`Manual capture requested: ${manualLabel(payload)}`, "ok");
@@ -209,27 +220,22 @@ async function captureManualState(payload) {
     });
 
     const tab = await getActivePowerBITab();
-    if (!tab?.id) return { ok: false, error: "No active Power BI tab found." };
+    if (!tab?.id) return { ok: false, error: "No Power BI dashboard tab is open. Open the Power BI dashboard tab in this window and try again." };
 
     const captureResult = await captureFullStateFromActiveTab(tab.id);
     if (!captureResult.ok) { await failProgress(captureResult.error); return captureResult; }
 
     const runId = `manual_run_${Date.now()}`; const stateId = `manual_state_${Date.now()}`;
-    const statePayload = {
+    const meta = {
       runId, stateId, stepId: "",
       clientName: payload.clientName || "", dashboardUrl: payload.dashboardUrl || "",
       pageName: payload.pageName || "", stateType: payload.stateType || "baseline",
       filterName: payload.filterName || "", filterValue: payload.filterValue || "",
-      capturedAt: new Date().toISOString(), slices: captureResult.slices
+      capturedAt: new Date().toISOString()
     };
 
-    await setProgress({
-      phase: "uploading", captureProgress: 100, uploadProgress: 5, extractionProgress: 0,
-      message: `Uploading ${captureResult.slices.length} slices`, runId, stateId
-    });
-
-    const postResult = await postCaptureState(payload.backendUrl, statePayload);
-    if (!postResult.ok) { await failProgress(postResult.error); return { ok: false, error: postResult.error }; }
+    const uploadResult = await uploadSlicesInChunks(payload.backendUrl, meta, captureResult.slices);
+    if (!uploadResult.ok) { await failProgress(uploadResult.error); return { ok: false, error: uploadResult.error }; }
 
     await setProgress({
       phase: "extracting", captureProgress: 100, uploadProgress: 100, extractionProgress: 15,
@@ -241,7 +247,96 @@ async function captureManualState(payload) {
   } finally {
     captureInProgress = false;
     clearCaptureWatchdog();
+    stopKeepAlive();
   }
+}
+
+async function uploadSlicesInChunks(backendUrl, meta, slices) {
+  const base = stripTrailingSlash(backendUrl);
+  const total = slices.length;
+
+  await setProgress({
+    phase: "uploading", captureProgress: 100, uploadProgress: 5, extractionProgress: 0,
+    message: `Starting upload of ${total} slices`, runId: meta.runId, stateId: meta.stateId
+  });
+
+  try {
+    const startRes = await fetch(`${base}/capture-state/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...meta, totalSlices: total })
+    });
+    if (!startRes.ok) {
+      const text = await safeReadText(startRes);
+      return { ok: false, error: `Start failed: HTTP ${startRes.status}${text ? `: ${text}` : ""}` };
+    }
+  } catch (err) {
+    return { ok: false, error: `Start request failed: ${err.message}` };
+  }
+
+  for (let i = 0; i < slices.length; i++) {
+    const slice = slices[i];
+    const sliceBody = {
+      runId: meta.runId,
+      stateId: meta.stateId,
+      sliceIndex: slice.sliceIndex,
+      scrollY: slice.scrollY || 0,
+      viewportWidth: slice.viewportWidth || 0,
+      viewportHeight: slice.viewportHeight || 0,
+      totalScrollHeight: slice.totalScrollHeight || 0,
+      clientHeight: slice.clientHeight || 0,
+      capturedAt: slice.capturedAt || new Date().toISOString(),
+      imageDataUrl: slice.imageDataUrl || ""
+    };
+
+    let attempt = 0;
+    let lastErr = "";
+    while (attempt < 3) {
+      attempt += 1;
+      try {
+        const res = await fetch(`${base}/capture-state/slice`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(sliceBody)
+        });
+        if (res.ok) { lastErr = ""; break; }
+        const text = await safeReadText(res);
+        lastErr = `HTTP ${res.status}${text ? `: ${text}` : ""}`;
+      } catch (err) {
+        lastErr = err.message;
+      }
+      await sleep(500 * attempt);
+    }
+
+    if (lastErr) return { ok: false, error: `Slice ${slice.sliceIndex} upload failed: ${lastErr}` };
+
+    const uploadProgress = Math.min(99, Math.floor(((i + 1) / total) * 100));
+    await setProgress({
+      phase: "uploading", captureProgress: 100, uploadProgress, extractionProgress: 0,
+      message: `Uploaded slice ${i + 1} of ${total}`, runId: meta.runId, stateId: meta.stateId
+    });
+  }
+
+  try {
+    const finRes = await fetch(`${base}/capture-state/finish`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ runId: meta.runId, stateId: meta.stateId })
+    });
+    if (!finRes.ok) {
+      const text = await safeReadText(finRes);
+      return { ok: false, error: `Finish failed: HTTP ${finRes.status}${text ? `: ${text}` : ""}` };
+    }
+  } catch (err) {
+    return { ok: false, error: `Finish request failed: ${err.message}` };
+  }
+
+  await setProgress({
+    phase: "uploading", captureProgress: 100, uploadProgress: 100, extractionProgress: 5,
+    message: `All ${total} slices uploaded`, runId: meta.runId, stateId: meta.stateId
+  });
+
+  return { ok: true };
 }
 
 async function pollExtractionStatus(backendUrl, runId, stateId) {
@@ -261,7 +356,7 @@ async function pollExtractionStatus(backendUrl, runId, stateId) {
         });
         if (s.stage === "done" || s.stage === "failed") return;
       }
-    } catch (_e) { /* silent retry */ }
+    } catch (_e) {}
     await sleep(2000);
   }
   await setProgress({
@@ -324,22 +419,6 @@ async function captureFullStateFromActiveTab(tabId) {
   return { ok: true, slices };
 }
 
-async function postCaptureState(backendUrl, payload) {
-  try {
-    const res = await fetch(`${stripTrailingSlash(backendUrl)}/capture-state`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-    if (!res.ok) {
-      const text = await safeReadText(res);
-      return { ok: false, error: `HTTP ${res.status}${text ? `: ${text}` : ""}` };
-    }
-    const json = await res.json().catch(() => ({}));
-    return { ok: true, data: json };
-  } catch (err) { return { ok: false, error: err.message }; }
-}
-
 async function maybePostJson(url, body) {
   try {
     await fetch(url, {
@@ -351,9 +430,32 @@ async function maybePostJson(url, body) {
 }
 
 async function getActivePowerBITab() {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tabs || !tabs.length) return null;
-  return tabs[0];
+  const pbTabsInWindow = await chrome.tabs.query({
+    currentWindow: true,
+    url: ["https://app.powerbi.com/*", "https://*.powerbi.com/*"]
+  });
+  if (pbTabsInWindow && pbTabsInWindow.length) {
+    const target = pbTabsInWindow[0];
+    try {
+      await chrome.tabs.update(target.id, { active: true });
+      if (target.windowId) await chrome.windows.update(target.windowId, { focused: true });
+      await new Promise(r => setTimeout(r, 300));
+    } catch (e) {}
+    return target;
+  }
+  const pbTabsAnywhere = await chrome.tabs.query({
+    url: ["https://app.powerbi.com/*", "https://*.powerbi.com/*"]
+  });
+  if (pbTabsAnywhere && pbTabsAnywhere.length) {
+    const target = pbTabsAnywhere[0];
+    try {
+      await chrome.tabs.update(target.id, { active: true });
+      if (target.windowId) await chrome.windows.update(target.windowId, { focused: true });
+      await new Promise(r => setTimeout(r, 400));
+    } catch (e) {}
+    return target;
+  }
+  return null;
 }
 
 function captureVisibleCurrentWindow() {
