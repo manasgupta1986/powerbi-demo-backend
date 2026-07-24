@@ -35,8 +35,28 @@ async function init() {
   renderManualFallbackOptions();
   bindEvents();
   await loadSavedState();
+  await autoResetIfStuck();
   await renderFromStorage();
   refreshTimer = setInterval(renderFromStorage, 1200);
+}
+
+async function autoResetIfStuck() {
+  const data = await storageGet([STORAGE_KEYS.progress]);
+  const progress = data[STORAGE_KEYS.progress];
+
+  if (!progress) return;
+
+  const lastUpdate = progress.updatedAt ? new Date(progress.updatedAt).getTime() : 0;
+  const ageMs = Date.now() - lastUpdate;
+  const looksStuck =
+    (progress.phase === "capturing" || progress.phase === "uploading") &&
+    ageMs > 90 * 1000;
+
+  if (looksStuck) {
+    await storageSet({ [STORAGE_KEYS.progress]: null });
+    await sendRuntimeMessage({ type: "MODE_B_RESET_CAPTURE_LOCK" });
+    await addLocalStatus("Detected stuck capture from previous session. Cleared automatically.", "warn");
+  }
 }
 
 function cacheEls() {
@@ -150,10 +170,12 @@ function bindEvents() {
   els.clearChatBtn.addEventListener("click", onClearChat);
 
   els.resetLockBtn.addEventListener("click", async () => {
-    const response = await sendRuntimeMessage({ type: "MODE_B_RESET_CAPTURE_LOCK" });
-    if (response.ok) await addLocalStatus("Capture lock reset.", "ok");
-    else await addLocalStatus("Could not reset lock.", "error");
-  });
+  await storageSet({ [STORAGE_KEYS.progress]: null });
+  const response = await sendRuntimeMessage({ type: "MODE_B_RESET_CAPTURE_LOCK" });
+  if (response.ok) await addLocalStatus("Capture lock reset and progress cleared.", "ok");
+  else await addLocalStatus("Progress cleared but lock reset failed.", "warn");
+  await renderFromStorage();
+});
 }
 
 async function loadSavedState() {
