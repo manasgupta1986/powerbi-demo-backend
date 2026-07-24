@@ -1,625 +1,891 @@
 const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
+const fsp = require("fs/promises");
 const path = require("path");
 
 const app = express();
-app.set("trust proxy", true);
 app.use(cors());
-app.use(express.json({ limit: "150mb" }));
+app.use(express.json({ limit: "120mb" }));
 
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3000;
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
+const RUNS_DIR = path.join(DATA_DIR, "runs");
+const REPORTS_DIR = path.join(DATA_DIR, "reports");
+const LATEST_DATA_PATH = path.join(DATA_DIR, "latest-data.json");
+const LATEST_REPORT_PATH = path.join(REPORTS_DIR, "latest-report.html");
+
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-const DATA_ROOT = process.env.DATA_DIR || path.join(__dirname, "local-data");
-const DATA_DIR = path.join(DATA_ROOT, "data");
-const REPORTS_DIR = path.join(DATA_ROOT, "reports");
-const SCREENSHOTS_DIR = path.join(DATA_ROOT, "screenshots");
+const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || "gpt-4o-mini";
+const OPENAI_TEXT_MODEL = process.env.OPENAI_TEXT_MODEL || "gpt-4o-mini";
+const MAX_AI_SLICES = Math.max(1, Math.min(6, Number(process.env.MAX_AI_SLICES || 4)));
 
-[DATA_ROOT, DATA_DIR, REPORTS_DIR, SCREENSHOTS_DIR].forEach((dir) => {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-});
+async function ensureDirs() {
+  await fsp.mkdir(DATA_DIR, { recursive: true });
+  await fsp.mkdir(RUNS_DIR, { recursive: true });
+  await fsp.mkdir(REPORTS_DIR, { recursive: true });
+}
 
-app.use("/storage", express.static(DATA_ROOT));
+function safeFileName(value) {
+  return String(value || "")
+    .replace(/[^a-zA-Z0-9._-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 160) || "item";
+}
 
-function readJsonSafe(filePath, fallback = null) {
+function stripDataUrlPrefix(dataUrl) {
+  const raw = String(dataUrl || "");
+  const idx = raw.indexOf(",");
+  return idx >= 0 ? raw.slice(idx + 1) : raw;
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+async function readJsonIfExists(filePath, fallback = null) {
   try {
-    if (!fs.existsSync(filePath)) return fallback;
-    return JSON.parse(fs.readFileSync(filePath, "utf8"));
-  } catch (err) {
+    const raw = await fsp.readFile(filePath, "utf8");
+    return JSON.parse(raw);
+  } catch {
     return fallback;
   }
 }
 
-function writeJson(filePath, data) {
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8");
+async function writeJson(filePath, data) {
+  await fsp.writeFile(filePath, JSON.stringify(data, null, 2), "utf8");
 }
 
-function sanitizeName(value) {
-  return String(value || "unknown")
-    .replace(/[^\w\s-]/g, "")
-    .trim()
-    .replace(/\s+/g, "-")
-    .slice(0, 120);
+function nowIso() { return new Date().toISOString(); }
+
+function getRunDir(runId) { return path.join(RUNS_DIR, safeFileName(runId)); }
+function getRunMetaPath(runId) { return path.join(getRunDir(runId), "run.json"); }
+function getStatesRoot(runId) { return path.join(getRunDir(runId), "states"); }
+function getStateDir(runId, stateId) { return path.join(getStatesRoot(runId), safeFileName(stateId)); }
+function getStateMetaPath(runId, stateId) { return path.join(getStateDir(runId, stateId), "state.json"); }
+function getStateExtractionPath(runId, stateId) { return path.join(getStateDir(runId, stateId), "extraction.json"); }
+function getStateImagesDir(runId, stateId) { return path.join(getStateDir(runId, stateId), "images"); }
+
+async function saveRunMetaFromPayload(payload) {
+  const runDir = getRunDir(payload.runId);
+  await fsp.mkdir(runDir, { recursive: true });
+
+  const runMetaPath = getRunMetaPath(payload.runId);
+  const existing = (await readJsonIfExists(runMetaPath, null)) || {};
+
+  const next = {
+    runId: payload.runId,
+    clientName: payload.clientName || existing.clientName || "",
+    dashboardUrl: payload.dashboardUrl || existing.dashboardUrl || "",
+    mode: payload.mode || existing.mode || "GUIDED_CAPTURE_MANUAL_SET_AUTO_SCROLL",
+    startedAt: existing.startedAt || payload.startedAt || nowIso(),
+    finishedAt: existing.finishedAt || "",
+    lastUpdatedAt: nowIso()
+  };
+
+  await writeJson(runMetaPath, next);
+  return next;
 }
 
-function escapeHtml(value) {
-  return String(value || "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-}
+async function saveSlices(runId, stateId, slices) {
+  const imagesDir = getStateImagesDir(runId, stateId);
+  await fsp.mkdir(imagesDir, { recursive: true });
 
-function isoStamp() {
-  return new Date().toISOString().replace(/[:.]/g, "-");
-}
+  const savedSlices = [];
 
-function extractJsonObject(text) {
-  if (!text) return null;
-  const firstBrace = text.indexOf("{");
-  const lastBrace = text.lastIndexOf("}");
-  if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) return null;
-  const candidate = text.slice(firstBrace, lastBrace + 1);
-  try {
-    return JSON.parse(candidate);
-  } catch (err) {
-    return null;
+  for (const slice of slices || []) {
+    const index = slice.sliceIndex || savedSlices.length + 1;
+    const fileName = `slice_${String(index).padStart(2, "0")}.png`;
+    const filePath = path.join(imagesDir, fileName);
+    const base64 = stripDataUrlPrefix(slice.imageDataUrl || "");
+
+    if (base64) {
+      await fsp.writeFile(filePath, Buffer.from(base64, "base64"));
+    }
+
+    savedSlices.push({
+      sliceIndex: index,
+      scrollY: slice.scrollY || 0,
+      viewportWidth: slice.viewportWidth || 0,
+      viewportHeight: slice.viewportHeight || 0,
+      totalScrollHeight: slice.totalScrollHeight || 0,
+      clientHeight: slice.clientHeight || 0,
+      capturedAt: slice.capturedAt || nowIso(),
+      imageFile: fileName,
+      imagePath: filePath
+    });
   }
+
+  return savedSlices;
 }
 
-function saveDataUrlImage(dataUrl, fileBaseName) {
-  if (!dataUrl || !dataUrl.startsWith("data:image")) return null;
-  const match = dataUrl.match(/^data:image\/png;base64,(.+)$/);
-  if (!match) return null;
+async function saveStateMeta(payload, savedSlices) {
+  const stateDir = getStateDir(payload.runId, payload.stateId);
+  await fsp.mkdir(stateDir, { recursive: true });
 
-  const buffer = Buffer.from(match[1], "base64");
-  const fileName = `${sanitizeName(fileBaseName)}.png`;
-  const filePath = path.join(SCREENSHOTS_DIR, fileName);
-  fs.writeFileSync(filePath, buffer);
+  const stateMeta = {
+    runId: payload.runId,
+    stateId: payload.stateId,
+    stepId: payload.stepId || "",
+    clientName: payload.clientName || "",
+    dashboardUrl: payload.dashboardUrl || "",
+    pageName: payload.pageName || "",
+    stateType: payload.stateType || "baseline",
+    filterName: payload.filterName || "",
+    filterValue: payload.filterValue || "",
+    capturedAt: payload.capturedAt || nowIso(),
+    sliceCount: savedSlices.length,
+    slices: savedSlices
+  };
 
+  await writeJson(getStateMetaPath(payload.runId, payload.stateId), stateMeta);
+  return stateMeta;
+}
+
+function selectRepresentativeSlices(slices, maxCount) {
+  const arr = Array.isArray(slices) ? slices : [];
+  if (arr.length <= maxCount) return arr;
+
+  const indexes = new Set();
+  indexes.add(0);
+  indexes.add(arr.length - 1);
+  indexes.add(Math.floor(arr.length / 2));
+
+  while (indexes.size < Math.min(maxCount, arr.length)) {
+    const ratio = indexes.size / Math.max(1, maxCount - 1);
+    indexes.add(Math.min(arr.length - 1, Math.floor(ratio * (arr.length - 1))));
+  }
+
+  const picked = [...indexes].sort((a, b) => a - b).slice(0, maxCount);
+  return picked.map((i) => arr[i]);
+}
+
+function buildExtractionFallback(stateMeta) {
   return {
-    fileName,
-    filePath,
-    publicUrl: `/storage/screenshots/${fileName}`
+    aiEnabled: false,
+    extractedAt: nowIso(),
+    stateSummary: {
+      pageName: stateMeta.pageName || "",
+      stateType: stateMeta.stateType || "baseline",
+      filterName: stateMeta.filterName || "",
+      filterValue: stateMeta.filterValue || "",
+      note: "AI extraction not available. Stored metadata only."
+    },
+    weekMappings: [],
+    charts: [],
+    executiveSummary: [
+      stateMeta.stateType === "baseline"
+        ? `${stateMeta.pageName} baseline captured with ${stateMeta.sliceCount || 0} slices.`
+        : `${stateMeta.pageName} with ${stateMeta.filterName} = ${stateMeta.filterValue} captured with ${stateMeta.sliceCount || 0} slices.`
+    ],
+    limitations: ["OPENAI_API_KEY not configured, so screenshot value extraction did not run."]
   };
 }
 
-function isoWeekStartDate(weekCode) {
-  if (!weekCode) return null;
-  const match = String(weekCode).match(/(\d{4})-?W(\d{1,2})/i);
-  if (!match) return null;
-
-  const year = Number(match[1]);
-  const week = Number(match[2]);
-  if (!year || !week) return null;
-
-  const simple = new Date(Date.UTC(year, 0, 4));
-  const day = simple.getUTCDay() || 7;
-  const monday = new Date(simple);
-  monday.setUTCDate(simple.getUTCDate() - day + 1 + (week - 1) * 7);
-  return monday.toISOString().slice(0, 10);
-}
-
-function enrichWeekDates(chartExtractions = []) {
-  for (const capture of chartExtractions) {
-    for (const chart of capture.charts || []) {
-      for (const series of chart.series || []) {
-        for (const point of series.points || []) {
-          if (!point.week_start_date && point.x_label) {
-            point.week_start_date = isoWeekStartDate(point.x_label);
-          }
-        }
-      }
-    }
-  }
-  return chartExtractions;
-}
-
-async function callOpenAI(messages, temperature = 0.2) {
-  if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is not set.");
-
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+async function callOpenAIChatJSON({ model, messages, temperature = 0.1 }) {
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${OPENAI_API_KEY}`
+      "Authorization": `Bearer ${OPENAI_API_KEY}`
     },
     body: JSON.stringify({
-      model: "gpt-4.1-mini",
-      messages,
-      temperature
+      model,
+      temperature,
+      response_format: { type: "json_object" },
+      messages
     })
   });
 
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`OpenAI error: ${text}`);
+  if (!res.ok) {
+    const text = await safeReadText(res);
+    throw new Error(`OpenAI JSON call failed: HTTP ${res.status}${text ? `: ${text}` : ""}`);
   }
 
-  const json = await response.json();
-  return json?.choices?.[0]?.message?.content?.trim() || "";
+  const json = await res.json();
+  const content = json?.choices?.[0]?.message?.content || "{}";
+  return JSON.parse(content);
 }
 
-async function locateUiElements(screenshotDataUrl, labels, viewport) {
-  if (!OPENAI_API_KEY) {
-    return {
-      targets: [],
-      notes: ["OPENAI_API_KEY not set"]
-    };
-  }
-  if (!screenshotDataUrl || !Array.isArray(labels) || labels.length === 0) {
-    return { targets: [], notes: ["Missing screenshot or labels"] };
-  }
-
-  const prompt = `You are a UI element locator for a Power BI report screenshot.
-Return STRICT JSON only, no prose.
-
-Viewport size in CSS pixels (matches what a page click uses):
-- width: ${viewport?.width || "unknown"}
-- height: ${viewport?.height || "unknown"}
-- deviceScaleFactor: ${viewport?.deviceScaleFactor || 1}
-
-For each requested label, return the center pixel coordinate INSIDE the screenshot image.
-If the label is not visible, return null for x and y and confidence 0.
-
-Requested labels:
-${labels.map((l, i) => `${i + 1}. "${l}"`).join("\n")}
-
-Output exactly:
-{
-  "image_width": <number>,
-  "image_height": <number>,
-  "targets": [
-    {
-      "label": "<exact label from list>",
-      "x": <number|null>,
-      "y": <number|null>,
-      "confidence": <0..1>,
-      "notes": "<short reason>"
-    }
-  ]
-}`;
-
-  const response = await callOpenAI([
-    {
-      role: "system",
-      content: "You precisely locate small UI elements in dashboard screenshots and return coordinates."
+async function callOpenAIChatText({ model, messages, temperature = 0.2 }) {
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${OPENAI_API_KEY}`
     },
-    {
-      role: "user",
-      content: [
-        { type: "text", text: prompt },
-        { type: "image_url", image_url: { url: screenshotDataUrl } }
-      ]
-    }
-  ], 0);
+    body: JSON.stringify({
+      model,
+      temperature,
+      messages
+    })
+  });
 
-  const parsed = extractJsonObject(response);
-  if (!parsed || !Array.isArray(parsed.targets)) {
-    return { targets: [], notes: ["Vision response could not be parsed"] };
+  if (!res.ok) {
+    const text = await safeReadText(res);
+    throw new Error(`OpenAI text call failed: HTTP ${res.status}${text ? `: ${text}` : ""}`);
   }
 
-  return parsed;
+  const json = await res.json();
+  return json?.choices?.[0]?.message?.content || "";
 }
 
-async function extractChartsFromCapture(capture) {
-  const prompt = `You are a chart-data extraction engine. Use ONLY the screenshot and the provided visible text. Do not use outside knowledge.
+function normalizeExtractionResult(raw, stateMeta) {
+  const charts = Array.isArray(raw?.charts) ? raw.charts : [];
+  const weekMappings = Array.isArray(raw?.weekMappings) ? raw.weekMappings : [];
+  const executiveSummary = Array.isArray(raw?.executiveSummary) ? raw.executiveSummary : [];
+  const limitations = Array.isArray(raw?.limitations) ? raw.limitations : [];
 
-Return STRICT JSON only:
-{
-  "capture_context": {
-    "page_name": "${capture.pageName || ""}",
-    "phase": "${capture.phase || ""}",
-    "filter_name": "${capture.filterName || ""}",
-    "filter_value": "${capture.filterValue || ""}"
-  },
-  "charts": [
-    {
-      "chart_title": "",
-      "metric_name": "",
-      "chart_type": "line|bar|stacked bar|area|table|funnel|other",
-      "chart_visibility": "full|partial",
-      "x_axis_label": "",
-      "y_axis_label": "",
-      "y_axis_unit": "%|count|index|currency|unknown",
-      "series": [
-        {
-          "app_name": "",
-          "points": [
-            { "x_label": "", "approx_value": 0, "unit": "", "week_start_date": null }
-          ]
-        }
-      ],
-      "notes": []
-    }
-  ],
-  "capture_notes": []
-}
-
-Visible text extracted from the page:
-${(capture.visibleText || "").slice(0, 12000)}`;
-
-  const content = [{ type: "text", text: prompt }];
-  if (capture.screenshotDataUrl) {
-    content.push({
-      type: "image_url",
-      image_url: { url: capture.screenshotDataUrl }
-    });
-  }
-
-  const resultText = await callOpenAI([
-    { role: "system", content: "You extract structured chart data from screenshots. Always return valid JSON only." },
-    { role: "user", content }
-  ], 0.1);
-
-  const parsed = extractJsonObject(resultText);
-  if (!parsed) {
+  const safeCharts = charts.map((chart, chartIndex) => {
+    const datapoints = Array.isArray(chart?.datapoints) ? chart.datapoints : [];
     return {
-      capture_context: {
-        page_name: capture.pageName || "",
-        phase: capture.phase || "",
-        filter_name: capture.filterName || "",
-        filter_value: capture.filterValue || ""
-      },
-      charts: [],
-      capture_notes: ["Chart extraction failed to parse as JSON."]
+      chartId: chart?.chartId || `chart_${chartIndex + 1}`,
+      title: chart?.title || `Chart ${chartIndex + 1}`,
+      chartType: chart?.chartType || "",
+      xAxisLabel: chart?.xAxisLabel || "",
+      yAxisLabel: chart?.yAxisLabel || "",
+      unit: chart?.unit || "",
+      seriesNames: Array.isArray(chart?.seriesNames) ? chart.seriesNames : [],
+      datapoints: datapoints.map((dp) => ({
+        seriesName: dp?.seriesName || "",
+        appName: dp?.appName || dp?.seriesName || "",
+        xLabel: dp?.xLabel || "",
+        weekCode: dp?.weekCode || "",
+        inferredStartDate: dp?.inferredStartDate || null,
+        value: typeof dp?.value === "number" ? dp.value : null,
+        unit: dp?.unit || chart?.unit || "",
+        confidence: typeof dp?.confidence === "number" ? dp.confidence : null,
+        note: dp?.note || ""
+      })),
+      insights: Array.isArray(chart?.insights) ? chart.insights : []
     };
-  }
-  return parsed;
-}
+  });
 
-function fallbackSummary(run) {
-  const pages = [...new Set((run.captures || []).map(c => c.pageName).filter(Boolean))];
-  const chartCount = (run.chartExtractions || []).reduce((sum, item) => sum + (item.charts || []).length, 0);
-
-  return `
-EXECUTIVE TAKEAWAY
-Saved run for ${run.clientName || "the client"}: ${chartCount} extracted chart(s) across ${pages.length} page(s). AI strategic analysis is not active.
-
-NUMERIC HIGHLIGHTS
-No AI-generated numeric interpretation is available in fallback mode.
-
-WHAT IMPROVED
-Review extracted chart tables in the report.
-
-WHAT WEAKENED
-Review extracted chart tables in the report.
-
-COMPETITIVE WATCHOUTS
-Not available in fallback mode.
-
-SUGGESTED ACTIONS
-1. Confirm OPENAI_API_KEY is present in Render.
-2. Keep the dashboard focused on the last 4 weeks.
-3. Run with a small filter set first for stable chart extraction.
-
-CAVEATS
-This fallback is storage-first, not strategy-first.`.trim();
-}
-
-async function buildStrategicSummary(run) {
-  if (!OPENAI_API_KEY) return fallbackSummary(run);
-
-  const dataset = {
-    client_name: run.clientName,
-    dashboard_url: run.dashboardUrl,
-    created_at: run.createdAt,
-    pages: run.pages,
-    filters: run.filters,
-    chart_extractions: run.chartExtractions
+  return {
+    aiEnabled: true,
+    extractedAt: nowIso(),
+    stateSummary: {
+      pageName: stateMeta.pageName || "",
+      stateType: stateMeta.stateType || "baseline",
+      filterName: stateMeta.filterName || "",
+      filterValue: stateMeta.filterValue || "",
+      chartCount: safeCharts.length
+    },
+    weekMappings: weekMappings.map((m) => ({
+      weekCode: m?.weekCode || "",
+      inferredStartDate: m?.inferredStartDate || null,
+      confidence: typeof m?.confidence === "number" ? m.confidence : null,
+      evidence: m?.evidence || ""
+    })),
+    charts: safeCharts,
+    executiveSummary,
+    limitations
   };
+}
 
-  const prompt = `You are preparing a strategic weekly dashboard report for ${run.clientName || "the client"}'s insights and category lead.
+async function analyzeStateWithAI(payload, stateMeta) {
+  if (!OPENAI_API_KEY) return buildExtractionFallback(stateMeta);
 
-Rules:
-1. Use ONLY the dataset below.
-2. Be numeric: say "grew by approx. X%" or "declined by approx. X points" whenever supported.
-3. Focus on recent weekly trends.
-4. Synthesize across charts, do not narrate each chart mechanically.
-5. Write from the client's viewpoint.
-6. Mark approximate numbers with "approx.".
-7. If the data is too weak for a conclusion, say so.
-8. Structure:
+  const representative = selectRepresentativeSlices(payload.slices || [], MAX_AI_SLICES);
 
-EXECUTIVE TAKEAWAY
-NUMERIC HIGHLIGHTS
-WHAT IMPROVED
-WHAT WEAKENED
-COMPETITIVE WATCHOUTS
-SUGGESTED ACTIONS
-CAVEATS
+  const content = [
+    {
+      type: "text",
+      text:
+        `You are analyzing dashboard screenshots for structured data extraction.\n` +
+        `The result must be based ONLY on the screenshots and the supplied state metadata.\n` +
+        `Do NOT use outside knowledge.\n\n` +
+        `State metadata:\n` +
+        `- clientName: ${payload.clientName || ""}\n` +
+        `- pageName: ${payload.pageName || ""}\n` +
+        `- stateType: ${payload.stateType || "baseline"}\n` +
+        `- filterName: ${payload.filterName || ""}\n` +
+        `- filterValue: ${payload.filterValue || ""}\n\n` +
+        `Return strict JSON with this structure:\n` +
+        `{\n` +
+        `  "weekMappings": [{"weekCode":"2026-W1","inferredStartDate":"2026-01-05","confidence":0.7,"evidence":"..."}],\n` +
+        `  "charts": [\n` +
+        `    {\n` +
+        `      "chartId":"chart_1",\n` +
+        `      "title":"...",\n` +
+        `      "chartType":"line|bar|stacked bar|table|other",\n` +
+        `      "xAxisLabel":"...",\n` +
+        `      "yAxisLabel":"...",\n` +
+        `      "unit":"%|share|index|count|currency|other",\n` +
+        `      "seriesNames":["..."],\n` +
+        `      "datapoints":[\n` +
+        `        {\n` +
+        `          "seriesName":"...",\n` +
+        `          "appName":"...",\n` +
+        `          "xLabel":"...",\n` +
+        `          "weekCode":"...",\n` +
+        `          "inferredStartDate":"YYYY-MM-DD or null",\n` +
+        `          "value":12.3,\n` +
+        `          "unit":"%",\n` +
+        `          "confidence":0.8,\n` +
+        `          "note":"approximate OCR/visual estimate if needed"\n` +
+        `        }\n` +
+        `      ],\n` +
+        `      "insights":["short factual numeric observations only"]\n` +
+        `    }\n` +
+        `  ],\n` +
+        `  "executiveSummary":["short factual bullet style statements with numbers if visible"],\n` +
+        `  "limitations":["what could not be read clearly"]\n` +
+        `}\n\n` +
+        `Rules:\n` +
+        `- Extract approximate numeric values where possible.\n` +
+        `- If a chart is unreadable, omit uncertain datapoints instead of inventing values.\n` +
+        `- Preserve week codes exactly if visible.\n` +
+        `- Only infer dates if there is visible evidence in the screenshots.\n` +
+        `- Stay closed-book.`
+    }
+  ];
 
-Dataset:
-${JSON.stringify(dataset).slice(0, 120000)}`;
+  for (const slice of representative) {
+    if (slice?.imageDataUrl) {
+      content.push({
+        type: "image_url",
+        image_url: { url: slice.imageDataUrl }
+      });
+    }
+  }
+
+  const raw = await callOpenAIChatJSON({
+    model: OPENAI_VISION_MODEL,
+    temperature: 0.1,
+    messages: [
+      { role: "system", content: "You are a careful data extraction assistant. Return strict JSON only." },
+      { role: "user", content }
+    ]
+  });
+
+  return normalizeExtractionResult(raw, stateMeta);
+}
+
+async function saveExtraction(runId, stateId, extraction) {
+  await writeJson(getStateExtractionPath(runId, stateId), extraction);
+}
+
+function flattenExtractedRows(stateMeta, extraction) {
+  const rows = [];
+  const charts = Array.isArray(extraction?.charts) ? extraction.charts : [];
+
+  for (const chart of charts) {
+    const datapoints = Array.isArray(chart?.datapoints) ? chart.datapoints : [];
+    for (const dp of datapoints) {
+      rows.push({
+        runId: stateMeta.runId,
+        stateId: stateMeta.stateId,
+        pageName: stateMeta.pageName || "",
+        stateType: stateMeta.stateType || "baseline",
+        filterName: stateMeta.filterName || "",
+        filterValue: stateMeta.filterValue || "",
+        chartTitle: chart?.title || "",
+        chartType: chart?.chartType || "",
+        xAxisLabel: chart?.xAxisLabel || "",
+        yAxisLabel: chart?.yAxisLabel || "",
+        unit: dp?.unit || chart?.unit || "",
+        seriesName: dp?.seriesName || "",
+        appName: dp?.appName || dp?.seriesName || "",
+        xLabel: dp?.xLabel || "",
+        weekCode: dp?.weekCode || "",
+        inferredStartDate: dp?.inferredStartDate || null,
+        value: typeof dp?.value === "number" ? dp.value : null,
+        confidence: typeof dp?.confidence === "number" ? dp.confidence : null,
+        note: dp?.note || "",
+        capturedAt: stateMeta.capturedAt || ""
+      });
+    }
+  }
+
+  return rows;
+}
+
+function buildComparableKey(row) {
+  return [
+    row.pageName || "",
+    row.filterName || "",
+    row.filterValue || "",
+    row.chartTitle || "",
+    row.seriesName || row.appName || ""
+  ].join(" | ");
+}
+
+function sortRowsChronologically(rows) {
+  return [...rows].sort((a, b) => {
+    const ad = a.inferredStartDate || "";
+    const bd = b.inferredStartDate || "";
+    if (ad && bd && ad !== bd) return ad.localeCompare(bd);
+
+    const aw = a.weekCode || "";
+    const bw = b.weekCode || "";
+    if (aw !== bw) return aw.localeCompare(bw);
+
+    return String(a.xLabel || "").localeCompare(String(b.xLabel || ""));
+  });
+}
+
+function buildHeuristicReport(latestData) {
+  const rows = Array.isArray(latestData?.extractedRows) ? latestData.extractedRows : [];
+  const client = latestData?.clientName || "the client";
+  const states = latestData?.states || [];
+
+  if (!rows.length) {
+    return [
+      `Report for ${client}:`,
+      `The latest run captured ${states.length} state(s), but no numeric chart datapoints were extracted yet.`,
+      `Stored states are available for review, and chart-value extraction can improve as screenshot clarity and coverage increase.`
+    ].join("\n\n");
+  }
+
+  const groups = new Map();
+  for (const row of rows) {
+    const key = buildComparableKey(row);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+
+  const movementLines = [];
+  for (const [key, groupRows] of groups.entries()) {
+    const ordered = sortRowsChronologically(groupRows).filter((r) => typeof r.value === "number");
+    if (ordered.length >= 2) {
+      const first = ordered[0];
+      const last = ordered[ordered.length - 1];
+      const delta = +(last.value - first.value).toFixed(2);
+      movementLines.push(
+        `${last.seriesName || last.appName || "Series"} in ${last.chartTitle || "chart"} moved from ${first.value}${first.unit || ""} to ${last.value}${last.unit || ""} (${delta >= 0 ? "+" : ""}${delta}${last.unit || ""}) across the observed period.`
+      );
+    }
+  }
+
+  return [
+    `Report for ${client}:`,
+    `The latest run includes ${latestData.totalStates || 0} state(s), ${latestData.totalSlices || 0} slice(s), and ${rows.length} extracted datapoint(s).`,
+    movementLines.length
+      ? movementLines.slice(0, 8).join(" ")
+      : `Numeric datapoints were extracted, but there were not enough comparable points to compute trend movement robustly.`,
+    `This report is based only on captured dashboard screenshots.`
+  ].join("\n\n");
+}
+
+function buildAskFallback(latestData, question) {
+  const rows = Array.isArray(latestData?.extractedRows) ? latestData.extractedRows : [];
+  const states = latestData?.states || [];
+  const q = String(question || "").trim().toLowerCase();
+
+  if (!latestData) return "I do not have any captured dashboard data yet.";
+
+  if (q.includes("summary") || q.includes("overview") || q.includes("what did we capture") || q.includes("what was captured")) {
+    return `The latest run contains ${latestData.totalStates || states.length} state(s), ${latestData.totalSlices || 0} slice(s), and ${rows.length} extracted datapoint(s).`;
+  }
+  if (q.includes("how many states")) return `The latest run contains ${latestData.totalStates || states.length} captured state(s).`;
+  if (q.includes("how many slices")) return `The latest run contains ${latestData.totalSlices || 0} captured slice(s).`;
+
+  const matchedRows = rows.filter((r) => {
+    const text = [r.pageName, r.filterName, r.filterValue, r.chartTitle, r.seriesName, r.appName, r.weekCode, r.xLabel].join(" ").toLowerCase();
+    return q && (text.includes(q) || q.split(/\s+/).some((token) => token && text.includes(token)));
+  });
+
+  if (matchedRows.length) {
+    const sample = matchedRows.slice(0, 8).map((r) => {
+      const series = r.seriesName || r.appName || "series";
+      const point = r.weekCode || r.xLabel || "point";
+      const value = typeof r.value === "number" ? `${r.value}${r.unit || ""}` : "unreadable";
+      const scope = r.filterName ? `${r.pageName} / ${r.filterName}=${r.filterValue}` : `${r.pageName} baseline`;
+      return `${scope} → ${series} at ${point}: ${value}`;
+    });
+
+    return `I found matching extracted datapoints: ${sample.join("; ")}.`;
+  }
+
+  if (rows.length) {
+    return `I could not answer that confidently from the extracted dataset alone. The latest run contains ${rows.length} datapoint(s), but I do not see a direct match for your question in the stored extraction output.`;
+  }
+  return `I could not answer that from extracted dashboard data. The latest run has stored states, but no numeric extraction rows are available yet.`;
+}
+
+function buildCondensedDataset(latestData, limit = 350) {
+  const rows = Array.isArray(latestData?.extractedRows) ? latestData.extractedRows : [];
+  return {
+    runId: latestData?.runId || "",
+    clientName: latestData?.clientName || "",
+    totalStates: latestData?.totalStates || 0,
+    totalSlices: latestData?.totalSlices || 0,
+    weekMappings: Array.isArray(latestData?.weekMappings) ? latestData.weekMappings : [],
+    states: (latestData?.states || []).map((s) => ({
+      pageName: s.pageName || "",
+      stateType: s.stateType || "baseline",
+      filterName: s.filterName || "",
+      filterValue: s.filterValue || "",
+      sliceCount: s.sliceCount || 0,
+      capturedAt: s.capturedAt || ""
+    })),
+    extractedRows: rows.slice(0, limit)
+  };
+}
+
+async function generateClientAwareReport(latestData) {
+  const rows = Array.isArray(latestData?.extractedRows) ? latestData.extractedRows : [];
+  if (!OPENAI_API_KEY || !rows.length) return buildHeuristicReport(latestData);
+
+  const dataset = buildCondensedDataset(latestData, 300);
 
   try {
-    const resultText = await callOpenAI([
-      { role: "system", content: "You are a rigorous retail/app analyst. You only use provided data." },
-      { role: "user", content: prompt }
-    ], 0.2);
-    return resultText || fallbackSummary(run);
-  } catch (err) {
-    console.error("Summary error", err.message);
-    return fallbackSummary(run);
+    const text = await callOpenAIChatText({
+      model: OPENAI_TEXT_MODEL,
+      temperature: 0.2,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You write concise business analysis from structured dashboard data only. " +
+            "Do not use external knowledge. Use numeric values whenever available. " +
+            "If a number is approximate, say approximately. " +
+            "Frame the report from the named client's perspective."
+        },
+        {
+          role: "user",
+          content:
+            `Write a strategic report for client "${latestData.clientName || ""}".\n` +
+            `Rules:\n` +
+            `- Use ONLY the provided dataset.\n` +
+            `- Focus on trends over the last 4 weeks where possible.\n` +
+            `- Mention numeric movement explicitly.\n` +
+            `- If dates are not confidently known, use visible week codes.\n` +
+            `- If evidence is thin, say so.\n\n` +
+            `Dataset JSON:\n${JSON.stringify(dataset)}`
+        }
+      ]
+    });
+
+    return text || buildHeuristicReport(latestData);
+  } catch {
+    return buildHeuristicReport(latestData);
   }
 }
 
-function buildHtmlReport(run) {
-  const summaryHtml = escapeHtml(run.summary || "").replace(/\n/g, "<br>");
+async function answerClosedBook(latestData, question) {
+  const rows = Array.isArray(latestData?.extractedRows) ? latestData.extractedRows : [];
+  if (!OPENAI_API_KEY || !rows.length) return buildAskFallback(latestData, question);
 
-  const extractionHtml = (run.chartExtractions || []).map((capture, captureIndex) => {
-    const chartsHtml = (capture.charts || []).map((chart, chartIndex) => {
-      const seriesHtml = (chart.series || []).map((series) => {
-        const rows = (series.points || []).map((point) => `
-          <tr>
-            <td>${escapeHtml(point.x_label || "")}</td>
-            <td>${escapeHtml(point.week_start_date || "")}</td>
-            <td>${escapeHtml(point.approx_value)}</td>
-            <td>${escapeHtml(point.unit || chart.y_axis_unit || "")}</td>
-          </tr>
-        `).join("");
+  const dataset = buildCondensedDataset(latestData, 300);
 
+  try {
+    const text = await callOpenAIChatText({
+      model: OPENAI_TEXT_MODEL,
+      temperature: 0.1,
+      messages: [
+        {
+          role: "system",
+          content:
+            "Answer questions using ONLY the provided dashboard dataset. " +
+            "Do not use external knowledge. If the answer is not in the data, say that clearly. " +
+            "Be numeric when possible."
+        },
+        {
+          role: "user",
+          content: `Question: ${question}\n\nDataset JSON:\n${JSON.stringify(dataset)}`
+        }
+      ]
+    });
+
+    return text || buildAskFallback(latestData, question);
+  } catch {
+    return buildAskFallback(latestData, question);
+  }
+}
+
+function buildReportHtml(latestData, reportText) {
+  const states = latestData?.states || [];
+  const rows = latestData?.extractedRows || [];
+  const stateRowsHtml = states.length
+    ? states.map((s) => {
+        const label = s.stateType === "baseline"
+          ? `${s.pageName} — Baseline`
+          : `${s.pageName} — ${s.filterName} = ${s.filterValue}`;
         return `
-          <div class="seriesBox">
-            <h5>${escapeHtml(series.app_name || "Unknown series")}</h5>
-            <table>
-              <thead><tr><th>X label</th><th>Week start</th><th>Approx value</th><th>Unit</th></tr></thead>
-              <tbody>${rows || `<tr><td colspan="4">No points extracted</td></tr>`}</tbody>
-            </table>
-          </div>`;
-      }).join("");
+          <tr>
+            <td>${escapeHtml(label)}</td>
+            <td>${escapeHtml(String(s.sliceCount || 0))}</td>
+            <td>${escapeHtml(s.capturedAt || "")}</td>
+          </tr>
+        `;
+      }).join("")
+    : `<tr><td colspan="3">No states available.</td></tr>`;
 
-      return `
-        <div class="chartCard">
-          <h4>${captureIndex + 1}.${chartIndex + 1} ${escapeHtml(chart.chart_title || chart.metric_name || "Untitled chart")}</h4>
-          <div class="metaGrid">
-            <div><strong>Page</strong><br>${escapeHtml(capture.capture_context?.page_name || "")}</div>
-            <div><strong>Phase</strong><br>${escapeHtml(capture.capture_context?.phase || "")}</div>
-            <div><strong>Filter</strong><br>${escapeHtml(capture.capture_context?.filter_name || "")}</div>
-            <div><strong>Value</strong><br>${escapeHtml(capture.capture_context?.filter_value || "")}</div>
-            <div><strong>Chart type</strong><br>${escapeHtml(chart.chart_type || "")}</div>
-            <div><strong>Y unit</strong><br>${escapeHtml(chart.y_axis_unit || "")}</div>
-          </div>
-          <div class="notes"><strong>Notes:</strong> ${escapeHtml((chart.notes || []).join(" | "))}</div>
-          ${seriesHtml || `<div class="notes">No chart series extracted.</div>`}
-        </div>`;
-    }).join("");
+  const datapointRowsHtml = rows.length
+    ? rows.slice(0, 120).map((r) => `
+        <tr>
+          <td>${escapeHtml(r.pageName || "")}</td>
+          <td>${escapeHtml(r.filterName ? `${r.filterName} = ${r.filterValue}` : "Baseline")}</td>
+          <td>${escapeHtml(r.chartTitle || "")}</td>
+          <td>${escapeHtml(r.seriesName || r.appName || "")}</td>
+          <td>${escapeHtml(r.weekCode || r.xLabel || "")}</td>
+          <td>${escapeHtml(r.inferredStartDate || "")}</td>
+          <td>${escapeHtml(typeof r.value === "number" ? String(r.value) : "")}${escapeHtml(r.unit || "")}</td>
+          <td>${escapeHtml(typeof r.confidence === "number" ? String(r.confidence) : "")}</td>
+        </tr>
+      `).join("")
+    : `<tr><td colspan="8">No extracted numeric datapoints yet.</td></tr>`;
 
-    return `
-      <section class="captureSection">
-        <h3>Capture ${captureIndex + 1}: ${escapeHtml(capture.capture_context?.page_name || "Unnamed page")}</h3>
-        ${chartsHtml || `<div class="notes">No charts extracted from this screenshot.</div>`}
-      </section>`;
-  }).join("");
+  const reportParagraphs = String(reportText || "")
+    .split(/\n{2,}/)
+    .filter(Boolean)
+    .map((p) => `<p>${escapeHtml(p)}</p>`)
+    .join("");
 
-  const screenshotHtml = (run.captures || []).map((capture) => `
-    <div class="shotCard">
-      <div class="shotMeta">
-        <strong>${escapeHtml(capture.pageName || "")}</strong><br>
-        ${escapeHtml(capture.filterName || "baseline")} | ${escapeHtml(capture.filterValue || "overall")}<br>
-        ${escapeHtml(capture.verificationNote || "")}
-      </div>
-      ${capture.screenshotUrl ? `<img src="${capture.screenshotUrl}" alt="capture">` : ""}
-    </div>`).join("");
-
-  return `
-<!DOCTYPE html>
+  return `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Power BI Strategic Report</title>
+  <title>${escapeHtml("PowerBI Guided Capture Report")}</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 24px; background: #f6f8fb; color: #1f2937; }
-    .box { background: white; border-radius: 14px; padding: 18px; margin-bottom: 18px; box-shadow: 0 2px 14px rgba(0,0,0,0.08); }
-    h1,h2,h3,h4,h5 { margin-top: 0; }
-    .summaryText { line-height: 1.55; white-space: normal; }
-    .metaGrid { display: grid; grid-template-columns: repeat(auto-fit,minmax(140px,1fr)); gap: 10px; font-size: 13px; margin-bottom: 12px; }
-    .chartCard, .shotCard { border: 1px solid #d8dee7; border-radius: 12px; padding: 12px; margin-bottom: 14px; background: #fff; }
-    .captureSection { margin-bottom: 24px; }
-    .seriesBox { margin-top: 10px; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
-    th, td { border: 1px solid #e4e8ef; padding: 8px; text-align: left; }
-    th { background: #f7fafc; }
-    .notes { font-size: 13px; color: #475569; margin: 8px 0; }
-    img { width: 100%; border-radius: 10px; border: 1px solid #d7dde5; margin-top: 8px; }
-    .twoCol { display: grid; grid-template-columns: 1.4fr 1fr; gap: 18px; }
-    @media (max-width: 900px) { .twoCol { grid-template-columns: 1fr; } }
+    body { font-family: Arial, Helvetica, sans-serif; margin: 24px; color: #111827; }
+    h1 { margin-bottom: 8px; }
+    h2 { margin-top: 0; }
+    .muted { color: #6b7280; margin-bottom: 20px; }
+    .card { border: 1px solid #d1d5db; border-radius: 12px; padding: 16px; margin-bottom: 18px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border: 1px solid #d1d5db; padding: 10px; text-align: left; font-size: 13px; vertical-align: top; }
+    th { background: #f3f4f6; }
+    .small { font-size: 12px; color: #6b7280; }
+    p { line-height: 1.55; }
   </style>
 </head>
 <body>
-  <div class="box">
-    <h1>Power BI Strategic Report</h1>
-    <div><strong>Client:</strong> ${escapeHtml(run.clientName || "")}</div>
-    <div><strong>Created at:</strong> ${escapeHtml(run.createdAt || "")}</div>
-    <div><strong>Dashboard URL:</strong> ${escapeHtml(run.dashboardUrl || "")}</div>
-    <div><strong>Pages:</strong> ${escapeHtml((run.pages || []).join(", "))}</div>
+  <h1>PowerBI Guided Capture Report</h1>
+  <div class="muted">
+    Client: ${escapeHtml(latestData?.clientName || "Unknown")} •
+    Run: ${escapeHtml(latestData?.runId || "")} •
+    States: ${escapeHtml(String(latestData?.totalStates || 0))} •
+    Slices: ${escapeHtml(String(latestData?.totalSlices || 0))} •
+    Extracted datapoints: ${escapeHtml(String((latestData?.extractedRows || []).length))}
   </div>
-  <div class="box">
+
+  <div class="card">
     <h2>Strategic Summary</h2>
-    <div class="summaryText">${summaryHtml}</div>
+    ${reportParagraphs || "<p>No report text available yet.</p>"}
   </div>
-  <div class="box">
-    <h2>Extracted Chart Dataset</h2>
-    ${extractionHtml || "<p>No chart extraction available.</p>"}
+
+  <div class="card">
+    <h2>Captured States</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>State</th>
+          <th>Slices</th>
+          <th>Captured At</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${stateRowsHtml}
+      </tbody>
+    </table>
   </div>
-  <div class="box">
-    <h2>Source Screenshots</h2>
-    <div class="twoCol">
-      ${screenshotHtml || "<p>No screenshots saved.</p>"}
-    </div>
+
+  <div class="card">
+    <h2>Extracted Datapoints</h2>
+    <div class="small">Showing up to 120 extracted rows.</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Page</th>
+          <th>State</th>
+          <th>Chart</th>
+          <th>Series / App</th>
+          <th>Week / X</th>
+          <th>Inferred Date</th>
+          <th>Value</th>
+          <th>Confidence</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${datapointRowsHtml}
+      </tbody>
+    </table>
   </div>
 </body>
-</html>`.trim();
+</html>`;
 }
 
-app.get("/health", (req, res) => {
-  res.json({ ok: true, service: "powerbi-demo-backend", dataRoot: DATA_ROOT });
-});
+async function buildLatestDataForRun(runId) {
+  const runMeta = (await readJsonIfExists(getRunMetaPath(runId), null)) || {
+    runId,
+    clientName: "",
+    dashboardUrl: "",
+    mode: "GUIDED_CAPTURE_MANUAL_SET_AUTO_SCROLL",
+    startedAt: "",
+    finishedAt: "",
+    lastUpdatedAt: nowIso()
+  };
 
-app.get("/latest-data", (req, res) => {
-  const file = path.join(DATA_DIR, "latest-run.json");
-  if (!fs.existsSync(file)) return res.status(404).json({ ok: false, error: "No saved run found yet." });
-  const json = readJsonSafe(file, null);
-  if (!json) return res.status(500).json({ ok: false, error: "Saved run exists but could not be read." });
-  res.json({ ok: true, data: json });
-});
+  const statesRoot = getStatesRoot(runId);
+  const stateFolders = await fsp.readdir(statesRoot).catch(() => []);
 
-app.get("/latest-report", (req, res) => {
-  const file = path.join(REPORTS_DIR, "latest-report.html");
-  if (!fs.existsSync(file)) return res.status(404).send("No saved report found yet.");
-  res.sendFile(file);
-});
+  const states = [];
+  const extractedRows = [];
+  const weekMappings = [];
 
-app.post("/find-ui", async (req, res) => {
-  try {
-    const { screenshotDataUrl, labels, viewport } = req.body || {};
-    const result = await locateUiElements(screenshotDataUrl, labels, viewport);
-    res.json({ ok: true, ...result });
-  } catch (err) {
-    console.error("Find UI error", err);
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
+  for (const folder of stateFolders) {
+    const stateDir = path.join(statesRoot, folder);
+    const stateMeta = await readJsonIfExists(path.join(stateDir, "state.json"), null);
+    const extraction = await readJsonIfExists(path.join(stateDir, "extraction.json"), null);
 
-app.post("/analyze", async (req, res) => {
-  try {
-    const { clientName, dashboardUrl, pages, filters, captures } = req.body || {};
-    if (!Array.isArray(captures) || captures.length === 0) {
-      return res.status(400).json({ ok: false, error: "No captures received." });
-    }
+    if (!stateMeta) continue;
 
-    const createdAt = new Date().toISOString();
-    const stamp = isoStamp();
-
-    const savedCaptures = captures.map((capture, index) => {
-      const baseName = [
-        stamp,
-        capture.phase || "phase",
-        capture.pageName || "page",
-        capture.filterName || "baseline",
-        capture.filterValue || "overall",
-        index + 1
-      ].map(sanitizeName).join("_");
-
-      let screenshotUrl = "";
-      const savedImage = saveDataUrlImage(capture.screenshotDataUrl, baseName);
-      if (savedImage) screenshotUrl = savedImage.publicUrl;
-
-      return {
-        phase: capture.phase || "unknown",
-        pageName: capture.pageName || "",
-        filterName: capture.filterName || "",
-        filterValue: capture.filterValue || "",
-        visibleText: capture.visibleText || "",
-        verificationNote: capture.verificationNote || "",
-        screenshotUrl
-      };
+    states.push({
+      stateId: stateMeta.stateId,
+      stepId: stateMeta.stepId || "",
+      pageName: stateMeta.pageName || "",
+      stateType: stateMeta.stateType || "baseline",
+      filterName: stateMeta.filterName || "",
+      filterValue: stateMeta.filterValue || "",
+      capturedAt: stateMeta.capturedAt || "",
+      sliceCount: stateMeta.sliceCount || 0,
+      aiEnabled: !!extraction?.aiEnabled,
+      chartCount: Array.isArray(extraction?.charts) ? extraction.charts.length : 0,
+      executiveSummary: Array.isArray(extraction?.executiveSummary) ? extraction.executiveSummary : []
     });
 
-    let chartExtractions = [];
-    if (OPENAI_API_KEY) {
-      for (const capture of captures) {
-        try {
-          const extraction = await extractChartsFromCapture(capture);
-          chartExtractions.push(extraction);
-        } catch (err) {
-          chartExtractions.push({
-            capture_context: {
-              page_name: capture.pageName || "",
-              phase: capture.phase || "",
-              filter_name: capture.filterName || "",
-              filter_value: capture.filterValue || ""
-            },
-            charts: [],
-            capture_notes: [`Extraction error: ${err.message}`]
-          });
-        }
+    if (extraction) {
+      extractedRows.push(...flattenExtractedRows(stateMeta, extraction));
+      if (Array.isArray(extraction.weekMappings)) {
+        weekMappings.push(...extraction.weekMappings);
       }
     }
-
-    chartExtractions = enrichWeekDates(chartExtractions);
-
-    const latestRun = {
-      clientName: clientName || "",
-      dashboardUrl: dashboardUrl || "",
-      createdAt,
-      pages: Array.isArray(pages) ? pages : [],
-      filters: Array.isArray(filters) ? filters : [],
-      captures: savedCaptures,
-      chartExtractions
-    };
-
-    latestRun.summary = await buildStrategicSummary(latestRun);
-
-    writeJson(path.join(DATA_DIR, "latest-run.json"), latestRun);
-    fs.writeFileSync(path.join(REPORTS_DIR, "latest-report.html"), buildHtmlReport(latestRun), "utf8");
-    writeJson(path.join(DATA_DIR, `run-${stamp}.json`), latestRun);
-    fs.writeFileSync(path.join(REPORTS_DIR, `report-${stamp}.html`), buildHtmlReport(latestRun), "utf8");
-
-    const baseUrl = `${req.protocol}://${req.get("host")}`;
-    res.json({
-      ok: true,
-      message: "Analysis saved successfully.",
-      latestDataUrl: `${baseUrl}/latest-data`,
-      latestReportUrl: `${baseUrl}/latest-report`,
-      summary: latestRun.summary
-    });
-  } catch (err) {
-    console.error("Analyze error", err);
-    res.status(500).json({ ok: false, error: err.message });
   }
+
+  states.sort((a, b) => String(a.capturedAt || "").localeCompare(String(b.capturedAt || "")));
+
+  return {
+    runId: runMeta.runId || runId,
+    clientName: runMeta.clientName || "",
+    dashboardUrl: runMeta.dashboardUrl || "",
+    mode: runMeta.mode || "",
+    startedAt: runMeta.startedAt || "",
+    finishedAt: runMeta.finishedAt || "",
+    updatedAt: nowIso(),
+    totalStates: states.length,
+    totalSlices: states.reduce((a, s) => a + (s.sliceCount || 0), 0),
+    states,
+    extractedRows,
+    weekMappings
+  };
+}
+
+async function refreshLatestArtifacts(runId) {
+  const latestData = await buildLatestDataForRun(runId);
+  const reportText = await generateClientAwareReport(latestData);
+  latestData.reportText = reportText;
+
+  await writeJson(LATEST_DATA_PATH, latestData);
+  await fsp.writeFile(LATEST_REPORT_PATH, buildReportHtml(latestData, reportText), "utf8");
+
+  return latestData;
+}
+
+async function safeReadText(res) {
+  try { return await res.text(); } catch { return ""; }
+}
+
+app.get("/health", async (req, res) => {
+  const latest = await readJsonIfExists(LATEST_DATA_PATH, null);
+  res.json({
+    ok: true,
+    service: "powerbi-demo-backend",
+    dataDir: DATA_DIR,
+    aiEnabled: !!OPENAI_API_KEY,
+    visionModel: OPENAI_VISION_MODEL,
+    textModel: OPENAI_TEXT_MODEL,
+    latestRunId: latest?.runId || "",
+    totalStates: latest?.totalStates || 0,
+    totalSlices: latest?.totalSlices || 0,
+    extractedRows: Array.isArray(latest?.extractedRows) ? latest.extractedRows.length : 0
+  });
+});
+
+app.post("/capture-state", async (req, res) => {
+  const payload = req.body || {};
+
+  if (!payload.runId) return res.status(400).json({ ok: false, error: "Missing runId." });
+  if (!payload.stateId) return res.status(400).json({ ok: false, error: "Missing stateId." });
+  if (!Array.isArray(payload.slices) || !payload.slices.length) {
+    return res.status(400).json({ ok: false, error: "Missing slices." });
+  }
+
+  await saveRunMetaFromPayload(payload);
+  const savedSlices = await saveSlices(payload.runId, payload.stateId, payload.slices);
+  const stateMeta = await saveStateMeta(payload, savedSlices);
+
+  let extraction;
+  try {
+    extraction = await analyzeStateWithAI(payload, stateMeta);
+  } catch (err) {
+    extraction = { ...buildExtractionFallback(stateMeta), limitations: [`AI extraction failed: ${err.message}`] };
+  }
+
+  await saveExtraction(payload.runId, payload.stateId, extraction);
+  const latestData = await refreshLatestArtifacts(payload.runId);
+
+  return res.json({
+    ok: true,
+    runId: payload.runId,
+    stateId: payload.stateId,
+    savedSlices: savedSlices.length,
+    extractedCharts: Array.isArray(extraction?.charts) ? extraction.charts.length : 0,
+    extractedRows: Array.isArray(latestData?.extractedRows) ? latestData.extractedRows.length : 0,
+    latestData
+  });
+});
+
+app.post("/finish-run", async (req, res) => {
+  const runId = req.body?.runId;
+  if (!runId) return res.json({ ok: true });
+
+  const runMetaPath = getRunMetaPath(runId);
+  const runMeta = await readJsonIfExists(runMetaPath, null);
+  if (runMeta) {
+    runMeta.finishedAt = req.body?.finishedAt || nowIso();
+    runMeta.lastUpdatedAt = nowIso();
+    await writeJson(runMetaPath, runMeta);
+    await refreshLatestArtifacts(runId);
+  }
+
+  return res.json({ ok: true });
+});
+
+app.get("/latest-data", async (req, res) => {
+  const latest = await readJsonIfExists(LATEST_DATA_PATH, null);
+  if (!latest) return res.status(404).json({ ok: false, error: "No latest data found." });
+  return res.json(latest);
+});
+
+app.get("/latest-report", async (req, res) => {
+  if (!fs.existsSync(LATEST_REPORT_PATH)) return res.status(404).send("No report found yet.");
+  return res.sendFile(LATEST_REPORT_PATH);
 });
 
 app.post("/ask", async (req, res) => {
-  try {
-    const { question, history } = req.body || {};
-    if (!question || !String(question).trim()) {
-      return res.status(400).json({ ok: false, error: "Question is required." });
-    }
-
-    const latestRun = readJsonSafe(path.join(DATA_DIR, "latest-run.json"), null);
-    if (!latestRun) return res.status(404).json({ ok: false, error: "No saved run found yet." });
-
-    if (!OPENAI_API_KEY) {
-      return res.json({
-        ok: true,
-        answer: "Closed-book chat is configured, but OPENAI_API_KEY is missing. Add it in Render to enable answers."
-      });
-    }
-
-    const historyText = Array.isArray(history)
-      ? history.slice(-8).map((m) => `${m.role}: ${m.content}`).join("\n")
-      : "";
-
-    const prompt = `Answer only from the dataset below.
-Rules: no outside knowledge. If not supported, say so. If asked to check online, say it is not enabled here. Use approximate numbers when available.
-
-Client: ${latestRun.clientName || ""}
-Summary:
-${latestRun.summary || ""}
-
-Extracted dataset:
-${JSON.stringify(latestRun.chartExtractions).slice(0, 120000)}
-
-Recent chat:
-${historyText}
-
-User: ${question}`;
-
-    const answer = await callOpenAI([
-      { role: "system", content: "You are a disciplined dashboard QA assistant grounded only in supplied data." },
-      { role: "user", content: prompt }
-    ], 0.2);
-
-    res.json({ ok: true, answer });
-  } catch (err) {
-    console.error("Ask error", err);
-    res.status(500).json({ ok: false, error: err.message });
-  }
+  const latest = await readJsonIfExists(LATEST_DATA_PATH, null);
+  const question = req.body?.question || "";
+  const answer = await answerClosedBook(latest, question);
+  return res.json({ ok: true, answer });
 });
 
-app.listen(PORT, () => {
-  console.log(`Power BI backend running on port ${PORT}`);
-  console.log(`DATA_ROOT=${DATA_ROOT}`);
-});
+ensureDirs()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`PowerBI backend listening on port ${PORT}`);
+      console.log(`DATA_DIR=${DATA_DIR}`);
+      console.log(`AI enabled=${!!OPENAI_API_KEY}`);
+    });
+  })
+  .catch((err) => {
+    console.error("Failed to initialize backend:", err);
+    process.exit(1);
+  });

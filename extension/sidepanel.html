@@ -1,156 +1,249 @@
 <!DOCTYPE html>
 <html>
-<head>
-  <meta charset="utf-8" />
-  <title>PowerBI Demo Assistant</title>
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      margin: 0;
-      padding: 14px;
-      background: #f5f7fb;
-      color: #1f2937;
-    }
-    h1 {
-      font-size: 18px;
-      margin: 0 0 12px 0;
-    }
-    .card {
-      background: #fff;
-      border-radius: 12px;
-      padding: 12px;
-      margin-bottom: 12px;
-      box-shadow: 0 2px 10px rgba(0,0,0,0.08);
-    }
-    label {
-      display: block;
-      font-size: 12px;
-      font-weight: 700;
-      margin-bottom: 4px;
-      margin-top: 10px;
-    }
-    input, textarea {
-      width: 100%;
-      box-sizing: border-box;
-      padding: 8px;
-      border: 1px solid #cfd6df;
-      border-radius: 8px;
-      font-size: 13px;
-    }
-    textarea {
-      min-height: 120px;
-      resize: vertical;
-      font-family: Menlo, Consolas, monospace;
-    }
-    .btn {
-      width: 100%;
-      border: none;
-      border-radius: 10px;
-      padding: 10px 12px;
-      margin-top: 8px;
-      font-size: 13px;
-      cursor: pointer;
-      font-weight: 700;
-    }
-    .btnPrimary { background: #1456ff; color: white; }
-    .btnSecondary { background: #1c8c52; color: white; }
-    .btnNeutral { background: #eceff4; color: #222; }
-    #statusBox, #summaryBox {
-      min-height: 90px;
-      max-height: 240px;
-      overflow-y: auto;
-      white-space: pre-wrap;
-      word-break: break-word;
-      border: 1px solid #d7dde5;
-      background: #fafbfc;
-      border-radius: 10px;
-      padding: 10px;
-      font-size: 12px;
-      line-height: 1.45;
-    }
-    #chatMessages {
-      min-height: 180px;
-      max-height: 340px;
-      overflow-y: auto;
-      border: 1px solid #d7dde5;
-      background: #fafbfc;
-      border-radius: 10px;
-      padding: 10px;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }
-    .msg {
-      padding: 10px 12px;
-      border-radius: 12px;
-      max-width: 92%;
-      line-height: 1.45;
-      white-space: pre-wrap;
-      word-break: break-word;
-      font-size: 13px;
-    }
-    .msg.user {
-      background: #1456ff;
-      color: white;
-      align-self: flex-end;
-    }
-    .msg.assistant {
-      background: #eef2f7;
-      color: #1f2937;
-      align-self: flex-start;
-    }
-    .small {
-      font-size: 11px;
-      color: #555;
-      margin-top: 6px;
-    }
-  </style>
-</head>
-<body>
-  <h1>PowerBI Demo Assistant</h1>
+  <head>
+    <meta charset="UTF-8" />
+    <title>PowerBI Demo Assistant</title>
+    <style>
+      :root {
+        --bg: #0f172a;
+        --panel: #111827;
+        --panel2: #1f2937;
+        --line: #334155;
+        --text: #e5e7eb;
+        --muted: #94a3b8;
+        --accent: #22c55e;
+        --blue: #38bdf8;
+        --warn: #f59e0b;
+        --danger: #ef4444;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: Arial, Helvetica, sans-serif;
+      }
+      .wrap { padding: 12px; }
+      .title { font-size: 18px; font-weight: 700; margin-bottom: 6px; }
+      .subtitle { font-size: 12px; color: var(--muted); line-height: 1.4; margin-bottom: 12px; }
+      .tabs { display: flex; gap: 8px; margin-bottom: 12px; }
+      .tab-btn {
+        flex: 1; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
+        background: var(--panel); color: var(--text); cursor: pointer; font-weight: 600;
+      }
+      .tab-btn.active { background: var(--blue); color: #082032; border-color: var(--blue); }
+      .panel { display: none; }
+      .panel.active { display: block; }
+      .card {
+        background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+        padding: 12px; margin-bottom: 12px;
+      }
+      .card h3 { margin: 0 0 10px 0; font-size: 14px; }
+      .field { display: grid; gap: 6px; margin-bottom: 10px; }
+      .field label { font-size: 12px; color: var(--muted); }
+      input, select, textarea {
+        width: 100%; padding: 10px 12px; border-radius: 10px;
+        border: 1px solid var(--line); background: var(--panel2); color: var(--text);
+        font-size: 13px;
+      }
+      textarea { min-height: 90px; resize: vertical; }
+      .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+      .btn {
+        padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
+        background: var(--panel2); color: var(--text); cursor: pointer; font-weight: 600;
+      }
+      .btn:hover { filter: brightness(1.06); }
+      .btn-primary { background: var(--accent); border-color: var(--accent); color: #052e16; }
+      .btn-blue { background: var(--blue); border-color: var(--blue); color: #082032; }
+      .btn-warn { background: var(--warn); border-color: var(--warn); color: #3f2600; }
+      .btn-danger { background: var(--danger); border-color: var(--danger); color: white; }
+      .badge {
+        display: inline-block; padding: 6px 10px; border-radius: 999px; background: #0b1220;
+        border: 1px solid var(--line); font-size: 12px; margin-bottom: 8px;
+      }
+      .muted { font-size: 12px; color: var(--muted); line-height: 1.45; }
+      .check-grid { display: grid; gap: 8px; }
+      .check-item {
+        display: flex; align-items: center; gap: 8px; background: #0b1220;
+        border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; font-size: 13px;
+      }
+      .check-item input { width: auto; margin: 0; }
+      .step-box {
+        background: #0b1220; border: 1px dashed var(--line); border-radius: 12px; padding: 12px;
+      }
+      .step-title { font-size: 14px; font-weight: 700; margin-bottom: 8px; }
+      .step-line { font-size: 13px; line-height: 1.5; margin-bottom: 4px; }
+      .step-big { font-size: 15px; font-weight: 700; color: white; }
+      .status-log { display: grid; gap: 8px; max-height: 240px; overflow: auto; }
+      .log-item {
+        background: #0b1220; border: 1px solid var(--line); border-left: 4px solid var(--blue);
+        border-radius: 10px; padding: 8px 10px; font-size: 12px; line-height: 1.45;
+      }
+      .log-item.ok { border-left-color: var(--accent); }
+      .log-item.warn { border-left-color: var(--warn); }
+      .log-item.error { border-left-color: var(--danger); }
+      .log-time { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+      .chat-history { display: grid; gap: 10px; max-height: 320px; overflow: auto; margin-bottom: 10px; }
+      .msg { border-radius: 12px; padding: 10px 12px; font-size: 13px; line-height: 1.45; white-space: pre-wrap; }
+      .msg.user { background: #10243f; border: 1px solid #1d4ed8; }
+      .msg.assistant { background: #0b1220; border: 1px solid var(--line); }
+      .msg-label { font-size: 11px; color: var(--muted); margin-bottom: 6px; text-transform: uppercase; }
+      .divider { height: 1px; background: var(--line); margin: 12px 0; }
+      .small { font-size: 11px; color: var(--muted); }
+      .reset-note {
+        background: #3f2600; border: 1px solid var(--warn); border-radius: 10px;
+        padding: 8px 10px; font-size: 12px; color: #fde68a; margin-top: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="title">PowerBI Demo Assistant</div>
+      <div class="subtitle">
+        Guided Capture mode: the extension tells you the next tab / filter / option. You set it manually in Power BI, then click <strong>Done, Capture Now</strong>.
+      </div>
 
-  <div class="card">
-    <label for="clientName">Client name</label>
-    <input id="clientName" type="text" placeholder="Amazon Demo" />
+      <div class="tabs">
+        <button class="tab-btn active" data-panel="capturePanel">Capture</button>
+        <button class="tab-btn" data-panel="chatPanel">Chat</button>
+      </div>
 
-    <label for="dashboardUrl">Dashboard URL</label>
-    <input id="dashboardUrl" type="text" placeholder="https://app.powerbi.com/view?..." />
+      <div id="capturePanel" class="panel active">
+        <div class="card">
+          <h3>Settings</h3>
+          <div class="field">
+            <label for="clientName">Client name</label>
+            <input id="clientName" type="text" placeholder="Amazon" />
+          </div>
+          <div class="field">
+            <label for="dashboardUrl">Dashboard URL</label>
+            <input id="dashboardUrl" type="text" placeholder="https://app.powerbi.com/..." />
+          </div>
+          <div class="field">
+            <label for="backendUrl">Backend URL</label>
+            <input id="backendUrl" type="text" placeholder="https://your-render-service.onrender.com" />
+          </div>
+          <button id="saveSettingsBtn" class="btn btn-primary">Save Settings</button>
+        </div>
 
-    <label for="backendUrl">Backend URL</label>
-    <input id="backendUrl" type="text" placeholder="https://your-service.onrender.com" />
+        <div class="card">
+          <h3>Guided Capture Setup</h3>
 
-    <label for="pageNames">Tab names (comma separated)</label>
-    <input id="pageNames" type="text" placeholder="Traffic Engagement, Purchase Matrix, Purchase Funnel" />
+          <div class="field">
+            <label>Tabs to include</label>
+            <div id="tabSelection" class="check-grid"></div>
+          </div>
 
-    <label for="filterConfig">Filter sweep config JSON</label>
-    <textarea id="filterConfig"></textarea>
+          <div class="field">
+            <label>Filters to include</label>
+            <div id="filterSelection" class="check-grid"></div>
+          </div>
 
-    <button id="saveBtn" class="btn btnNeutral">Save settings</button>
-    <button id="loadLatestBtn" class="btn btnPrimary">Load latest saved run</button>
-    <button id="openReportBtn" class="btn btnNeutral">Open latest saved report</button>
-    <button id="runSweepBtn" class="btn btnSecondary">Run new sweep</button>
+          <div class="field">
+            <label>Baseline</label>
+            <div class="check-item">
+              <input id="includeBaseline" type="checkbox" checked />
+              <span>Include baseline capture for each selected tab</span>
+            </div>
+          </div>
 
-    <div class="small">Start with one filter first. Chat answers only from extracted dashboard data.</div>
-  </div>
+          <div class="row">
+            <button id="startGuidedRunBtn" class="btn btn-blue">Start Guided Run</button>
+            <button id="finishRunBtn" class="btn btn-danger">Finish Active Run</button>
+          </div>
 
-  <div class="card">
-    <label>Status</label>
-    <div id="statusBox">Idle</div>
-  </div>
+          <div class="row" style="margin-top:8px;">
+            <button id="loadLatestRunBtn" class="btn">Load Latest Saved Run</button>
+            <button id="openLatestReportBtn" class="btn">Open Latest Saved Report</button>
+          </div>
+        </div>
 
-  <div class="card">
-    <label>Latest strategic summary</label>
-    <div id="summaryBox">No saved summary loaded yet.</div>
-  </div>
+        <div class="card">
+          <h3>Current Guided Step</h3>
+          <div id="runBadge" class="badge">No active guided run</div>
 
-  <div class="card">
-    <label>Dashboard Q&A</label>
-    <div id="chatMessages"></div>
-    <label for="chatInput">Ask from captured data</label>
-    <textarea id="chatInput" placeholder="Example: Which app improved the most in the last 2 visible weeks?"></textarea>
-    <button id="sendChatBtn" class="btn btnPrimary">Send</button>
-  </div>
+          <div id="currentStepBox" class="step-box">
+            <div class="step-title">Waiting to start</div>
+            <div class="step-line">Start a guided run to generate the capture queue.</div>
+          </div>
 
-  <script src="sidepanel.js"></script>
-</body>
+          <div class="row" style="margin-top:10px;">
+            <button id="doneCaptureBtn" class="btn btn-primary">Done, Capture Now</button>
+            <button id="skipStepBtn" class="btn btn-warn">Skip Step</button>
+          </div>
+
+          <div class="row" style="margin-top:8px;">
+            <button id="retryStepBtn" class="btn">Retry Current Step</button>
+            <button id="pauseRunBtn" class="btn">Pause Run</button>
+          </div>
+
+          <div class="muted" style="margin-top:10px;">
+            The extension does not click Power BI. It only guides the state and captures after you confirm the screen is ready.
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Manual Capture Fallback</h3>
+
+          <div class="field">
+            <label for="manualPage">Tab / page</label>
+            <select id="manualPage"></select>
+          </div>
+
+          <div class="row">
+            <div class="field">
+              <label for="manualStateType">State type</label>
+              <select id="manualStateType">
+                <option value="baseline">Baseline</option>
+                <option value="filtered">Filtered</option>
+              </select>
+            </div>
+
+            <div class="field">
+              <label for="manualFilterName">Filter name</label>
+              <select id="manualFilterName"></select>
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="manualFilterValue">Filter value</label>
+            <select id="manualFilterValue"></select>
+          </div>
+
+          <button id="manualCaptureBtn" class="btn btn-blue">Capture Current Visible State</button>
+          <div class="small" style="margin-top:8px;">
+            Use this only for one-off states outside the guided queue.
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Status</h3>
+          <div id="statusLog" class="status-log"></div>
+        </div>
+      </div>
+
+      <div id="chatPanel" class="panel">
+        <div class="card">
+          <h3>Data-Only Chat</h3>
+          <div class="muted" style="margin-bottom:10px;">
+            Chat answers from captured dashboard data only.
+          </div>
+
+          <div id="chatHistory" class="chat-history"></div>
+
+          <div class="field">
+            <label for="chatInput">Question</label>
+            <textarea id="chatInput" placeholder="Ask about the captured dashboard data..."></textarea>
+          </div>
+
+          <div class="row">
+            <button id="sendChatBtn" class="btn btn-primary">Send</button>
+            <button id="clearChatBtn" class="btn">Clear Chat</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="sidepanel.js"></script>
+  </body>
 </html>

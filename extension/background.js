@@ -1,371 +1,415 @@
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+const STORAGE_KEYS = {
+  settings: "pb_guided_settings_v1",
+  activeRun: "pb_guided_active_run_v1",
+  statusLog: "pb_guided_status_log_v1"
+};
 
-async function setStorage(v) { return chrome.storage.local.set(v); }
-async function getStorage(k) { return chrome.storage.local.get(k); }
-
-async function resetRunLog() {
-  await setStorage({ isRunning: false, runStatus: "Idle", runLog: [], lastError: "" });
-}
-
-async function addLog(line) {
-  const stamp = new Date().toLocaleTimeString();
-  const row = `[${stamp}] ${line}`;
-  const cur = await getStorage(["runLog"]);
-  const runLog = Array.isArray(cur.runLog) ? cur.runLog : [];
-  runLog.push(row);
-  await setStorage({ runLog });
-}
-
-async function setStatus(status) {
-  await setStorage({ runStatus: status });
-  await addLog(status);
-}
-
-chrome.runtime.onInstalled.addListener(async () => {
-  await resetRunLog();
-  if (chrome.sidePanel?.setPanelBehavior) {
-    await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
-  }
-});
-chrome.runtime.onStartup.addListener(async () => {
-  if (chrome.sidePanel?.setPanelBehavior) {
-    await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
-  }
-});
-
-async function waitForTabComplete(tabId, timeoutMs = 60000) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const tab = await chrome.tabs.get(tabId);
-    if (tab.status === "complete") return true;
-    await sleep(1000);
-  }
-  throw new Error("Dashboard tab did not finish loading in time.");
-}
-
-async function openOrReuseDashboardTab(dashboardUrl) {
-  const existing = await chrome.tabs.query({ url: ["https://app.powerbi.com/*"] });
-  if (existing.length > 0) {
-    const tab = existing[0];
-    await chrome.tabs.update(tab.id, { active: true, url: dashboardUrl });
-    await waitForTabComplete(tab.id);
-    return await chrome.tabs.get(tab.id);
-  }
-  const created = await chrome.tabs.create({ url: dashboardUrl, active: true });
-  await waitForTabComplete(created.id);
-  return created;
-}
-
-async function ensureContentScript(tabId) {
-  try {
-    const pong = await chrome.tabs.sendMessage(tabId, { type: "ping" });
-    if (pong?.ok) return true;
-  } catch (e) {}
-  await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
-  await sleep(1500);
-  const pong2 = await chrome.tabs.sendMessage(tabId, { type: "ping" });
-  if (pong2?.ok) return true;
-  throw new Error("Could not connect to content script.");
-}
-
-async function sendToTab(tabId, message) {
-  return chrome.tabs.sendMessage(tabId, message);
-}
-
-async function captureHeaderScreenshot(tabId) {
-  const tab = await chrome.tabs.get(tabId);
-  await chrome.tabs.update(tabId, { active: true });
-  await chrome.windows.update(tab.windowId, { focused: true });
-  await sleep(800);
-  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
-  const viewport = await sendToTab(tabId, { type: "getViewportInfo" });
-  return { dataUrl, viewport };
-}
-
-async function askBackendForCoordinates(backendUrl, screenshotDataUrl, labels, viewport) {
-  const cleanUrl = backendUrl.replace(/\/+$/, "");
-  const response = await fetch(`${cleanUrl}/find-ui`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ screenshotDataUrl, labels, viewport })
-  });
-  const json = await response.json();
-  if (!response.ok || !json.ok) throw new Error(json.error || "find-ui failed");
-  return json;
-}
-
-function scaleCoordsToViewport(target, imageWidth, imageHeight, viewport) {
-  if (!imageWidth || !imageHeight || !viewport?.width || !viewport?.height) return null;
-  if (target?.x == null || target?.y == null) return null;
-  const scaleX = viewport.width / imageWidth;
-  const scaleY = viewport.height / imageHeight;
-  return {
-    x: Math.round(target.x * scaleX),
-    y: Math.round(target.y * scaleY),
-    confidence: target.confidence || 0
-  };
-}
-
-async function visionClickLabel(tabId, backendUrl, label) {
-  const { dataUrl, viewport } = await captureHeaderScreenshot(tabId);
-  const result = await askBackendForCoordinates(backendUrl, dataUrl, [label], viewport);
-
-  const target = (result.targets || [])[0];
-  const point = scaleCoordsToViewport(target, result.image_width, result.image_height, viewport);
-
-  if (!point || point.confidence < 0.35) {
-    await addLog(`Vision could not locate "${label}" (confidence=${point?.confidence ?? "n/a"})`);
-    return { ok: false, note: `Vision could not locate "${label}"` };
-  }
-
-  await addLog(`Vision located "${label}" at (${point.x}, ${point.y}) confidence=${point.confidence}`);
-  const clickRes = await sendToTab(tabId, { type: "clickAtPoint", x: point.x, y: point.y });
-  await sleep(1500);
-  return {
-    ok: !!clickRes?.ok,
-    note: clickRes?.note || "",
-    point
-  };
-}
-
-async function captureVisibleState(tabId, meta) {
-  const tab = await chrome.tabs.get(tabId);
-  await chrome.tabs.update(tabId, { active: true });
-  await chrome.windows.update(tab.windowId, { focused: true });
-  await sleep(1400);
-  const screenshotDataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
-  const textResp = await sendToTab(tabId, { type: "getVisibleText" });
-  const scrollResp = await sendToTab(tabId, { type: "getScrollMetrics" });
-  return {
-    phase: meta.phase || "unknown",
-    pageName: meta.pageName || "",
-    filterName: meta.filterName || "",
-    filterValue: meta.filterValue || "",
-    verificationNote: meta.verificationNote || "",
-    visibleText: textResp?.visibleText || "",
-    screenshotDataUrl,
-    scrollY: scrollResp?.scrollY ?? null,
-    viewportHeight: scrollResp?.viewportHeight ?? null,
-    documentHeight: scrollResp?.documentHeight ?? null,
-    sliceIndex: meta.sliceIndex ?? null
-  };
-}
-
-async function captureAllSlices(tabId, phase, pageName, filterName, filterValue, note) {
-  const captures = [];
-  const topResp = await sendToTab(tabId, { type: "scrollToTop" });
-  await addLog(`Top reset for ${pageName}: Y=${topResp?.scrollY}, doc=${topResp?.documentHeight}, viewport=${topResp?.viewportHeight}`);
-  await sleep(800);
-
-  let safety = 0;
-  while (safety < 14) {
-    safety += 1;
-    const metrics = await sendToTab(tabId, { type: "getScrollMetrics" });
-    const sliceNumber = captures.length + 1;
-
-    const capture = await captureVisibleState(tabId, {
-      phase, pageName, filterName, filterValue,
-      verificationNote: `${note} | slice ${sliceNumber}`,
-      sliceIndex: sliceNumber
-    });
-    captures.push(capture);
-    await addLog(`Captured slice ${sliceNumber} for ${pageName} | ${filterName || "baseline"} | ${filterValue || "overall"} at Y=${metrics?.scrollY}`);
-
-    if (metrics?.atBottom) {
-      await addLog(`Reached bottom for ${pageName} at slice ${sliceNumber}`);
-      break;
-    }
-    const scrollResp = await sendToTab(tabId, { type: "scrollDownOneStep" });
-    if (scrollResp?.after?.scrollY === scrollResp?.before?.scrollY) {
-      await addLog(`Scroll stopped changing for ${pageName}.`);
-      break;
-    }
-    await sleep(800);
-  }
-  return captures;
-}
-
-async function openPageAndCapture(tabId, backendUrl, pageName, phase, filterName, filterValue) {
-  await addLog(`Opening page: ${pageName}`);
-  const clickResult = await visionClickLabel(tabId, backendUrl, pageName);
-  await sleep(1800);
-
-  const note = clickResult.ok
-    ? `Vision-clicked "${pageName}" at ${clickResult.point?.x},${clickResult.point?.y}`
-    : `Vision click for "${pageName}" failed`;
-  await addLog(note);
-
-  return await captureAllSlices(tabId, phase, pageName, filterName, filterValue, note);
-}
-
-async function verifyFilterValueChanged(tabId, backendUrl, filterName, expectedValue) {
-  const { dataUrl, viewport } = await captureHeaderScreenshot(tabId);
-  const labelToCheck = `${filterName} current value`;
-  const result = await askBackendForCoordinates(backendUrl, dataUrl, [labelToCheck, expectedValue], viewport);
-  const notes = (result.targets || []).map(t => `${t.label}: conf=${t.confidence}`).join(" | ");
-  await addLog(`Verification pass: ${notes}`);
-  const expected = (result.targets || []).find(t => t.label === expectedValue);
-  return !!(expected && expected.confidence >= 0.35);
-}
-
-async function resetFilterVision(tabId, backendUrl, filterName, allLabel) {
-  await addLog(`Resetting filter "${filterName}" to "${allLabel}"`);
-  const openRes = await visionClickLabel(tabId, backendUrl, filterName);
-  await sleep(1200);
-  if (!openRes.ok) return { ok: false, note: `Could not open filter ${filterName}` };
-
-  const allRes = await visionClickLabel(tabId, backendUrl, allLabel);
-  await sleep(1200);
-
-  await sendToTab(tabId, { type: "clickAtPoint", x: 8, y: 8 }); // click away
-  await sleep(800);
-
-  return {
-    ok: allRes.ok,
-    note: allRes.ok ? `Reset ${filterName} via vision` : `Reset click failed for ${filterName}`
-  };
-}
-
-async function applyFilterOptionVision(tabId, backendUrl, filterName, optionLabel) {
-  await addLog(`Selecting ${filterName} = ${optionLabel}`);
-  const openRes = await visionClickLabel(tabId, backendUrl, filterName);
-  await sleep(1200);
-  if (!openRes.ok) return { ok: false, note: `Could not open filter ${filterName}` };
-
-  let optionRes = await visionClickLabel(tabId, backendUrl, optionLabel);
-
-  if (!optionRes.ok && openRes.point) {
-    // try scrolling the dropdown and retry once
-    await sendToTab(tabId, {
-      type: "scrollDropdownAtPoint",
-      x: openRes.point.x,
-      y: openRes.point.y + 80,
-      step: 120
-    });
-    await sleep(800);
-    optionRes = await visionClickLabel(tabId, backendUrl, optionLabel);
-  }
-
-  await sleep(1200);
-  await sendToTab(tabId, { type: "clickAtPoint", x: 8, y: 8 }); // click away
-  await sleep(800);
-
-  return {
-    ok: optionRes.ok,
-    note: optionRes.ok ? `Selected ${filterName} = ${optionLabel} via vision` : `Option click failed`
-  };
-}
-
-async function callBackendAnalyze(backendUrl, payload) {
-  const cleanUrl = backendUrl.replace(/\/+$/, "");
-  const response = await fetch(`${cleanUrl}/analyze`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
-  });
-  const json = await response.json();
-  if (!response.ok || !json.ok) throw new Error(json.error || "Backend analyze failed.");
-  return json;
-}
-
-async function startSweep(payload) {
-  const cur = await getStorage(["isRunning"]);
-  if (cur.isRunning) throw new Error("A sweep is already running.");
-
-  await setStorage({ isRunning: true, runStatus: "Starting sweep...", runLog: [], lastError: "" });
-
-  try {
-    const clientName = payload.clientName || "";
-    const dashboardUrl = payload.dashboardUrl || "";
-    const backendUrl = payload.backendUrl || "";
-    const pageNames = Array.isArray(payload.pageNames) ? payload.pageNames : [];
-    const filterConfig = Array.isArray(payload.filterConfig) ? payload.filterConfig : [];
-
-    if (!dashboardUrl) throw new Error("Dashboard URL is blank.");
-    if (!backendUrl) throw new Error("Backend URL is blank.");
-    if (pageNames.length === 0) throw new Error("No page names provided.");
-    if (filterConfig.length === 0) throw new Error("No filter config provided.");
-
-    await setStatus("Opening dashboard...");
-    const tab = await openOrReuseDashboardTab(dashboardUrl);
-
-    await setStatus("Connecting to dashboard page...");
-    await ensureContentScript(tab.id);
-
-    const captures = [];
-
-    await setStatus("Capturing baseline with vision-based tab clicks...");
-    for (const pageName of pageNames) {
-      const pageCaptures = await openPageAndCapture(tab.id, backendUrl, pageName, "baseline", "baseline", "overall");
-      captures.push(...pageCaptures);
-    }
-
-    for (const filter of filterConfig) {
-      const filterName = filter.filterName;
-      const allLabel = filter.allLabel || "All";
-      const options = Array.isArray(filter.options) ? filter.options : [];
-
-      await setStatus(`Starting filter (vision): ${filterName}`);
-
-      for (const option of options) {
-        await addLog(`Preparing isolated state for ${filterName} = ${option}`);
-        const resetRes = await resetFilterVision(tab.id, backendUrl, filterName, allLabel);
-        if (!resetRes.ok) {
-          await addLog(`SKIPPED_CAPTURE: ${filterName} = ${option} because reset failed`);
-          continue;
-        }
-        const applyRes = await applyFilterOptionVision(tab.id, backendUrl, filterName, option);
-        if (!applyRes.ok) {
-          await addLog(`SKIPPED_CAPTURE: ${filterName} = ${option} because option selection failed`);
-          continue;
-        }
-        for (const pageName of pageNames) {
-          const pc = await openPageAndCapture(tab.id, backendUrl, pageName, "filtered", filterName, option);
-          captures.push(...pc);
-        }
-      }
-
-      await addLog(`Final reset of ${filterName} to ${allLabel}`);
-      await resetFilterVision(tab.id, backendUrl, filterName, allLabel);
-    }
-
-    if (captures.length === 0) throw new Error("No captures were produced.");
-
-    await setStatus("Sending captures to backend for chart extraction, strategic report, and chat dataset build...");
-    const result = await callBackendAnalyze(backendUrl, {
-      clientName, dashboardUrl,
-      pages: pageNames, filters: filterConfig, captures
-    });
-
-    await setStorage({
-      lastRunAt: new Date().toISOString(),
-      lastReportUrl: result.latestReportUrl || "",
-      lastDataUrl: result.latestDataUrl || "",
-      lastSummary: result.summary || "",
-      runStatus: "Sweep complete. Strategic report and chat dataset are ready.",
-      isRunning: false
-    });
-    await addLog("Sweep complete.");
-    await addLog(`Latest data URL: ${result.latestDataUrl}`);
-    await addLog(`Latest report URL: ${result.latestReportUrl}`);
-  } catch (err) {
-    await setStorage({ isRunning: false, runStatus: `Run failed: ${err.message}`, lastError: err.message });
-    await addLog(`ERROR: ${err.message}`);
-  }
-}
+let captureInProgress = false;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type === "logStatus") {
-    addLog(message.line || "Status update");
-    sendResponse({ ok: true });
-    return false;
-  }
-  if (message?.type === "startSweep") {
-    startSweep(message.payload).then(() => sendResponse({ ok: true })).catch((e) => sendResponse({ ok: false, error: e.message }));
-    return true;
-  }
-  if (message?.type === "resetLogs") {
-    resetRunLog().then(() => sendResponse({ ok: true })).catch((e) => sendResponse({ ok: false, error: e.message }));
-    return true;
-  }
+  (async () => {
+    try {
+      switch (message.type) {
+        case "MODE_B_START_GUIDED_RUN": {
+          const run = message.payload;
+          await storageSet({
+            [STORAGE_KEYS.activeRun]: run,
+            [STORAGE_KEYS.settings]: {
+              clientName: run.clientName,
+              dashboardUrl: run.dashboardUrl,
+              backendUrl: run.backendUrl
+            }
+          });
+          await addStatus(`Guided run started: ${run.runId} (${run.queue.length} steps)`, "ok");
+          sendResponse({ ok: true });
+          return;
+        }
+
+        case "MODE_B_FINISH_GUIDED_RUN": {
+          const run = await getActiveRun();
+          if (!run) { sendResponse({ ok: false, error: "No active run." }); return; }
+
+          run.finishedAt = new Date().toISOString();
+          await maybePostJson(`${stripTrailingSlash(run.backendUrl)}/finish-run`, {
+            runId: run.runId,
+            finishedAt: run.finishedAt
+          });
+
+          await storageRemove([STORAGE_KEYS.activeRun]);
+          await addStatus(`Guided run finished: ${run.runId}`, "ok");
+          sendResponse({ ok: true });
+          return;
+        }
+
+        case "MODE_B_TOGGLE_PAUSE_GUIDED_RUN": {
+          const run = await getActiveRun();
+          if (!run) { sendResponse({ ok: false, error: "No active run." }); return; }
+
+          run.paused = !run.paused;
+          await saveActiveRun(run);
+          await addStatus(run.paused ? "Guided run paused." : "Guided run resumed.", "warn");
+          sendResponse({ ok: true });
+          return;
+        }
+
+        case "MODE_B_SKIP_CURRENT_STEP": {
+          const run = await getActiveRun();
+          if (!run) { sendResponse({ ok: false, error: "No active run." }); return; }
+
+          const step = run.queue?.[run.currentIndex];
+          if (!step) { sendResponse({ ok: false, error: "No current step to skip." }); return; }
+
+          step.status = "skipped";
+          step.skippedAt = new Date().toISOString();
+          await addStatus(`Skipped: ${stepLabel(step)}`, "warn");
+
+          run.currentIndex += 1;
+          if (run.currentIndex >= run.queue.length) {
+            run.finishedAt = new Date().toISOString();
+            await addStatus(`Guided run completed: ${run.runId}`, "ok");
+          }
+
+          await saveActiveRun(run);
+          sendResponse({ ok: true });
+          return;
+        }
+
+        case "MODE_B_DONE_CAPTURE_CURRENT_STEP": {
+          const result = await captureCurrentGuidedStep(false);
+          sendResponse(result);
+          return;
+        }
+
+        case "MODE_B_RETRY_CURRENT_STEP": {
+          const result = await captureCurrentGuidedStep(true);
+          sendResponse(result);
+          return;
+        }
+
+        case "MODE_B_MANUAL_CAPTURE_CURRENT_STATE": {
+          const result = await captureManualState(message.payload);
+          sendResponse(result);
+          return;
+        }
+
+        default:
+          sendResponse({ ok: false, error: `Unknown message type: ${message.type}` });
+          return;
+      }
+    } catch (err) {
+      await addStatus(`Background error: ${err.message}`, "error");
+      sendResponse({ ok: false, error: err.message });
+    }
+  })();
+
+  return true;
 });
+
+async function captureCurrentGuidedStep(isRetry) {
+  if (captureInProgress) return { ok: false, error: "Another capture is already in progress." };
+
+  const run = await getActiveRun();
+  if (!run) return { ok: false, error: "No active run." };
+  if (run.paused) return { ok: false, error: "Run is paused." };
+
+  const step = run.queue?.[run.currentIndex];
+  if (!step) return { ok: false, error: "No current step." };
+
+  captureInProgress = true;
+
+  try {
+    step.status = "in_progress";
+    step.startedAt = new Date().toISOString();
+    await saveActiveRun(run);
+
+    await addStatus(`${isRetry ? "Retrying" : "Capturing"} step: ${stepLabel(step)}`, "ok");
+
+    const tab = await getActivePowerBITab();
+    if (!tab?.id) {
+      step.status = "failed";
+      step.failedAt = new Date().toISOString();
+      await saveActiveRun(run);
+      return { ok: false, error: "No active Power BI tab found." };
+    }
+
+    const captureResult = await captureFullStateFromActiveTab(tab.id);
+    if (!captureResult.ok) {
+      step.status = "failed";
+      step.failedAt = new Date().toISOString();
+      await saveActiveRun(run);
+      await addStatus(`Capture failed: ${captureResult.error}`, "error");
+      return captureResult;
+    }
+
+    const statePayload = {
+      runId: run.runId,
+      stateId: `state_${Date.now()}`,
+      stepId: step.stepId,
+      clientName: run.clientName,
+      dashboardUrl: run.dashboardUrl,
+      pageName: step.pageName,
+      stateType: step.stateType,
+      filterName: step.filterName || "",
+      filterValue: step.filterValue || "",
+      capturedAt: new Date().toISOString(),
+      slices: captureResult.slices
+    };
+
+    const postResult = await postCaptureState(run.backendUrl, statePayload);
+    if (!postResult.ok) {
+      step.status = "failed";
+      step.failedAt = new Date().toISOString();
+      await saveActiveRun(run);
+      await addStatus(`Upload failed: ${postResult.error}`, "error");
+      return { ok: false, error: postResult.error };
+    }
+
+    step.status = "completed";
+    step.completedAt = new Date().toISOString();
+    step.sliceCount = captureResult.slices.length;
+    run.currentIndex += 1;
+
+    if (run.currentIndex >= run.queue.length) {
+      run.finishedAt = new Date().toISOString();
+      await addStatus(`Guided run completed: ${run.runId}`, "ok");
+    } else {
+      const nextStep = run.queue[run.currentIndex];
+      await addStatus(
+        `Completed ${stepLabel(step)} (${captureResult.slices.length} slices). Next: ${stepLabel(nextStep)}`,
+        "ok"
+      );
+    }
+
+    await saveActiveRun(run);
+    return { ok: true, message: `Captured ${captureResult.slices.length} slices for ${stepLabel(step)}` };
+  } finally {
+    captureInProgress = false;
+  }
+}
+
+async function captureManualState(payload) {
+  if (captureInProgress) return { ok: false, error: "Another capture is already in progress." };
+  if (!payload?.backendUrl) return { ok: false, error: "Missing backend URL." };
+
+  captureInProgress = true;
+
+  try {
+    await addStatus(`Manual capture requested: ${manualLabel(payload)}`, "ok");
+
+    const tab = await getActivePowerBITab();
+    if (!tab?.id) return { ok: false, error: "No active Power BI tab found." };
+
+    const captureResult = await captureFullStateFromActiveTab(tab.id);
+    if (!captureResult.ok) {
+      await addStatus(`Manual capture failed: ${captureResult.error}`, "error");
+      return captureResult;
+    }
+
+    const statePayload = {
+      runId: `manual_run_${Date.now()}`,
+      stateId: `manual_state_${Date.now()}`,
+      stepId: "",
+      clientName: payload.clientName || "",
+      dashboardUrl: payload.dashboardUrl || "",
+      pageName: payload.pageName || "",
+      stateType: payload.stateType || "baseline",
+      filterName: payload.filterName || "",
+      filterValue: payload.filterValue || "",
+      capturedAt: new Date().toISOString(),
+      slices: captureResult.slices
+    };
+
+    const postResult = await postCaptureState(payload.backendUrl, statePayload);
+    if (!postResult.ok) {
+      await addStatus(`Manual upload failed: ${postResult.error}`, "error");
+      return { ok: false, error: postResult.error };
+    }
+
+    await addStatus(
+      `Manual capture uploaded: ${manualLabel(payload)} (${captureResult.slices.length} slices)`,
+      "ok"
+    );
+
+    return { ok: true, message: `Manual capture uploaded (${captureResult.slices.length} slices)` };
+  } finally {
+    captureInProgress = false;
+  }
+}
+
+async function captureFullStateFromActiveTab(tabId) {
+  const reset = await sendTabMessage(tabId, { type: "MODE_B_RESET_SCROLL_TOP" });
+  if (!reset.ok) return { ok: false, error: `Could not initialize scroll state: ${reset.error}` };
+
+  const slices = [];
+  const seenScrollY = new Set();
+  const maxSlices = 20;
+  let lastNextY = null;
+
+  for (let i = 0; i < maxSlices; i++) {
+    const metrics = await sendTabMessage(tabId, { type: "MODE_B_GET_SCROLL_METRICS" });
+    if (!metrics.ok) return { ok: false, error: `Could not read scroll metrics: ${metrics.error}` };
+
+    const scrollY = Math.round(metrics.scrollY || 0);
+
+    if (seenScrollY.has(scrollY) && i > 0) {
+      await addStatus(`Stopping capture on duplicate scroll position y=${scrollY}`, "warn");
+      break;
+    }
+    seenScrollY.add(scrollY);
+
+    const screenshot = await captureVisibleCurrentWindow();
+    if (!screenshot.ok) return { ok: false, error: screenshot.error || "Screenshot failed." };
+
+    slices.push({
+      sliceIndex: i + 1,
+      scrollY,
+      viewportWidth: metrics.viewportWidth || 0,
+      viewportHeight: metrics.viewportHeight || 0,
+      totalScrollHeight: metrics.totalScrollHeight || 0,
+      clientHeight: metrics.clientHeight || 0,
+      capturedAt: new Date().toISOString(),
+      imageDataUrl: screenshot.dataUrl
+    });
+
+    await addStatus(`Captured slice ${i + 1} at y=${scrollY}`, "ok");
+
+    if (metrics.bottomReached) {
+      await addStatus(`Reached bottom at slice ${i + 1}`, "ok");
+      break;
+    }
+
+    const next = await sendTabMessage(tabId, { type: "MODE_B_SCROLL_NEXT" });
+    if (!next.ok) return { ok: false, error: `Scroll failed: ${next.error}` };
+    if (!next.changed) {
+      await addStatus(`Stopping capture because scroll did not change`, "warn");
+      break;
+    }
+
+    const nextY = Math.round(next.scrollY || 0);
+    if (lastNextY !== null && nextY === lastNextY) {
+      await addStatus(`Stopping capture because next y repeated (${nextY})`, "warn");
+      break;
+    }
+    lastNextY = nextY;
+
+    await sleep(350);
+  }
+
+  if (!slices.length) return { ok: false, error: "No slices were captured." };
+  return { ok: true, slices };
+}
+
+async function postCaptureState(backendUrl, payload) {
+  try {
+    const res = await fetch(`${stripTrailingSlash(backendUrl)}/capture-state`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    if (!res.ok) {
+      const text = await safeReadText(res);
+      return { ok: false, error: `HTTP ${res.status}${text ? `: ${text}` : ""}` };
+    }
+
+    const json = await res.json().catch(() => ({}));
+    return { ok: true, data: json };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+async function maybePostJson(url, body) {
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+  } catch { /* best effort */ }
+}
+
+async function getActivePowerBITab() {
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tabs || !tabs.length) return null;
+  return tabs[0];
+}
+
+function captureVisibleCurrentWindow() {
+  return new Promise(resolve => {
+    chrome.tabs.captureVisibleTab(null, { format: "png" }, dataUrl => {
+      if (chrome.runtime.lastError) { resolve({ ok: false, error: chrome.runtime.lastError.message }); return; }
+      if (!dataUrl) { resolve({ ok: false, error: "captureVisibleTab returned empty image." }); return; }
+      resolve({ ok: true, dataUrl });
+    });
+  });
+}
+
+function sendTabMessage(tabId, message) {
+  return new Promise(resolve => {
+    chrome.tabs.sendMessage(tabId, message, response => {
+      if (chrome.runtime.lastError) { resolve({ ok: false, error: chrome.runtime.lastError.message }); return; }
+      resolve(response || { ok: false, error: "No response from content script." });
+    });
+  });
+}
+
+async function getActiveRun() {
+  const data = await storageGet([STORAGE_KEYS.activeRun]);
+  return data[STORAGE_KEYS.activeRun] || null;
+}
+
+async function saveActiveRun(run) {
+  await storageSet({ [STORAGE_KEYS.activeRun]: run });
+}
+
+async function addStatus(text, tone = "info") {
+  const data = await storageGet([STORAGE_KEYS.statusLog]);
+  const logs = data[STORAGE_KEYS.statusLog] || [];
+  logs.unshift({
+    ts: new Date().toLocaleString(),
+    text,
+    tone
+  });
+
+  await storageSet({ [STORAGE_KEYS.statusLog]: logs.slice(0, 200) });
+}
+
+function stepLabel(step) {
+  if (!step) return "Unknown step";
+  return step.stateType === "baseline"
+    ? `${step.pageName} → Baseline`
+    : `${step.pageName} → ${step.filterName} = ${step.filterValue}`;
+}
+
+function manualLabel(payload) {
+  return payload.stateType === "baseline"
+    ? `${payload.pageName} → Baseline`
+    : `${payload.pageName} → ${payload.filterName} = ${payload.filterValue}`;
+}
+
+function stripTrailingSlash(url) {
+  return String(url || "").replace(/\/+$/, "");
+}
+
+async function safeReadText(res) {
+  try { return await res.text(); } catch { return ""; }
+}
+
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+function storageGet(keys) {
+  return new Promise(resolve => {
+    chrome.storage.local.get(keys, result => resolve(result || {}));
+  });
+}
+function storageSet(obj) {
+  return new Promise(resolve => {
+    chrome.storage.local.set(obj, () => resolve());
+  });
+}
+function storageRemove(keys) {
+  return new Promise(resolve => {
+    chrome.storage.local.remove(keys, () => resolve());
+  });
+}

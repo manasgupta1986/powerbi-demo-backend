@@ -1,11 +1,14 @@
 {
   "name": "powerbi-demo-backend",
-  "version": "2.1.0",
-  "description": "Backend for Power BI screenshot analysis and chat",
+  "version": "4.0.0",
+  "description": "Guided capture backend with AI extraction, reporting, and closed-book Q&A",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
     "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
     "cors": "^2.8.5",

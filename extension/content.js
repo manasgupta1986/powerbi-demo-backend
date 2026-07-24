@@ -1,165 +1,138 @@
-let cachedMainScrollTarget = null;
-
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-function isVisible(el) {
-  if (!el) return false;
-  const style = window.getComputedStyle(el);
-  const rect = el.getBoundingClientRect();
-  return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
-}
-
-function isScrollableElement(el) {
-  if (!el || !(el instanceof Element)) return false;
-  const style = window.getComputedStyle(el);
-  const canByStyle = ["auto", "scroll", "overlay"].includes(style.overflowY);
-  const canBySize = el.scrollHeight > el.clientHeight + 40;
-  return isVisible(el) && el.clientHeight > 80 && canByStyle && canBySize;
-}
-
-function isDocumentScroller(t) {
-  return t === window || t === document || t === document.documentElement || t === document.body || t === document.scrollingElement;
-}
-
-function resetCachedMainScrollTarget() { cachedMainScrollTarget = null; }
-
-function getStableMainScrollTarget(force = false) {
-  if (!force && cachedMainScrollTarget && document.contains(cachedMainScrollTarget) && isScrollableElement(cachedMainScrollTarget)) {
-    return cachedMainScrollTarget;
-  }
-  const vw = window.innerWidth, vh = window.innerHeight;
-  const all = Array.from(document.querySelectorAll("*")).filter(isScrollableElement);
-  const scored = [];
-  for (const el of all) {
-    const rect = el.getBoundingClientRect();
-    if (rect.width < Math.max(320, vw * 0.45)) continue;
-    if (rect.height < Math.max(220, vh * 0.4)) continue;
-    let score = rect.width * rect.height / 1000;
-    score += (el.scrollHeight - el.clientHeight) / 4;
-    const cx = rect.left + rect.width / 2;
-    score -= Math.abs(cx - vw / 2);
-    if (rect.top >= 80 && rect.top <= 260) score += 160;
-    scored.push({ el, score });
-  }
-  scored.sort((a, b) => b.score - a.score);
-  cachedMainScrollTarget = scored[0]?.el || document.scrollingElement || document.documentElement || document.body;
-  return cachedMainScrollTarget;
-}
-
-function readScrollMetrics(t) {
-  if (isDocumentScroller(t)) {
-    const se = document.scrollingElement || document.documentElement || document.body;
-    const y = Math.round(window.scrollY || se.scrollTop || 0);
-    const vh = window.innerHeight || document.documentElement.clientHeight || 0;
-    const dh = Math.max(document.body?.scrollHeight || 0, document.documentElement?.scrollHeight || 0, se?.scrollHeight || 0);
-    return { scrollY: y, viewportHeight: vh, documentHeight: dh, atBottom: y + vh >= dh - 8 };
-  }
-  return { scrollY: Math.round(t.scrollTop), viewportHeight: Math.round(t.clientHeight), documentHeight: Math.round(t.scrollHeight), atBottom: t.scrollTop + t.clientHeight >= t.scrollHeight - 8 };
-}
-
-function setScrollTop(t, top) {
-  if (isDocumentScroller(t)) window.scrollTo({ top, left: 0, behavior: "instant" });
-  else t.scrollTop = top;
-}
-
-async function scrollToTop() {
-  const t = getStableMainScrollTarget(true);
-  setScrollTop(t, 0);
-  await sleep(1000);
-  const m = readScrollMetrics(t);
-  await logLine(`Scrolled main container to top. Y=${m.scrollY}, doc=${m.documentHeight}, viewport=${m.viewportHeight}`);
-  return { ok: true, ...m };
-}
-
-async function scrollDownOne() {
-  const t = getStableMainScrollTarget(false);
-  const before = readScrollMetrics(t);
-  const step = Math.max(300, Math.floor(before.viewportHeight * 0.75));
-  setScrollTop(t, before.scrollY + step);
-  await sleep(1000);
-  const after = readScrollMetrics(t);
-  await logLine(`Scrolled main container. Y ${before.scrollY} -> ${after.scrollY}`);
-  return { ok: true, before, after };
-}
-
-function getScrollMetrics() {
-  return readScrollMetrics(getStableMainScrollTarget(false));
-}
-
-async function logLine(line) {
-  try { await chrome.runtime.sendMessage({ type: "logStatus", line }); } catch (e) {}
-}
-
-function elementAtCssPoint(x, y) {
-  return document.elementFromPoint(x, y);
-}
-
-function dispatchAtPoint(x, y) {
-  const el = elementAtCssPoint(x, y);
-  if (!el) return { ok: false, note: `No element at (${x},${y})` };
-
-  const eventNames = ["mouseover", "mousedown", "mouseup", "click"];
-  for (const name of eventNames) {
-    el.dispatchEvent(new MouseEvent(name, {
-      view: window, bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0
-    }));
-  }
-  return { ok: true, note: `Clicked at (${x},${y}) tag=${el.tagName}` };
-}
-
-async function clickAtCssPoint(x, y) {
-  await logLine(`Vision click at (${x}, ${y})`);
-  const res = dispatchAtPoint(x, y);
-  await sleep(1000);
-  return res;
-}
-
-function getViewportInfo() {
-  return {
-    ok: true,
-    width: window.innerWidth,
-    height: window.innerHeight,
-    devicePixelRatio: window.devicePixelRatio || 1
-  };
-}
-
-function findDropdownScrollableAtPoint(x, y) {
-  const el = elementAtCssPoint(x, y);
-  if (!el) return null;
-  let current = el;
-  for (let i = 0; i < 8 && current; i += 1) {
-    if (isScrollableElement(current)) return current;
-    current = current.parentElement;
-  }
-  return null;
-}
-
-async function scrollDropdownAtPoint(x, y, step = 100) {
-  const target = findDropdownScrollableAtPoint(x, y);
-  if (!target) return { ok: false, note: "No scrollable dropdown at that point" };
-  const before = target.scrollTop;
-  target.scrollTop = before + step;
-  await sleep(600);
-  const after = target.scrollTop;
-  await logLine(`Dropdown scroll at (${x},${y}): ${before} -> ${after}`);
-  return { ok: after !== before, before, after };
-}
-
-function getVisibleText() {
-  return String(document.body?.innerText || "").replace(/\n{3,}/g, "\n\n").trim().slice(0, 30000);
-}
+let cachedScrollTarget = null;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
-    if (message?.type === "ping") { sendResponse({ ok: true }); return; }
-    if (message?.type === "getVisibleText") { sendResponse({ ok: true, visibleText: getVisibleText() }); return; }
-    if (message?.type === "getViewportInfo") { sendResponse(getViewportInfo()); return; }
-    if (message?.type === "scrollToTop") { sendResponse(await scrollToTop()); return; }
-    if (message?.type === "scrollDownOneStep") { sendResponse(await scrollDownOne()); return; }
-    if (message?.type === "getScrollMetrics") { sendResponse({ ok: true, ...getScrollMetrics() }); return; }
-    if (message?.type === "clickAtPoint") { sendResponse(await clickAtCssPoint(message.x, message.y)); return; }
-    if (message?.type === "scrollDropdownAtPoint") { sendResponse(await scrollDropdownAtPoint(message.x, message.y, message.step)); return; }
-    sendResponse({ ok: false, note: "Unknown content message type." });
+    try {
+      switch (message.type) {
+        case "MODE_B_RESET_SCROLL_TOP": {
+          const target = findMainScrollTarget();
+          cachedScrollTarget = target;
+          setScrollTop(target, 0);
+          await sleep(300);
+          sendResponse({ ok: true, ...readMetrics(target) });
+          return;
+        }
+
+        case "MODE_B_GET_SCROLL_METRICS": {
+          const target = cachedScrollTarget || findMainScrollTarget();
+          cachedScrollTarget = target;
+          sendResponse({ ok: true, ...readMetrics(target) });
+          return;
+        }
+
+        case "MODE_B_SCROLL_NEXT": {
+          const target = cachedScrollTarget || findMainScrollTarget();
+          cachedScrollTarget = target;
+
+          const before = getScrollTop(target);
+          const metricsBefore = readMetrics(target);
+          const step = Math.max(240, Math.floor((metricsBefore.clientHeight || window.innerHeight) * 0.82));
+
+          setScrollTop(target, before + step);
+          await sleep(450);
+
+          const after = getScrollTop(target);
+          const metricsAfter = readMetrics(target);
+
+          sendResponse({
+            ok: true,
+            changed: Math.round(after) !== Math.round(before),
+            scrollY: metricsAfter.scrollY,
+            bottomReached: metricsAfter.bottomReached,
+            viewportWidth: metricsAfter.viewportWidth,
+            viewportHeight: metricsAfter.viewportHeight,
+            totalScrollHeight: metricsAfter.totalScrollHeight,
+            clientHeight: metricsAfter.clientHeight
+          });
+          return;
+        }
+
+        default:
+          sendResponse({ ok: false, error: `Unknown content message type: ${message.type}` });
+          return;
+      }
+    } catch (err) {
+      sendResponse({ ok: false, error: err.message });
+    }
   })();
+
   return true;
 });
+
+function findMainScrollTarget() {
+  const candidates = [];
+  const all = [...document.querySelectorAll("*")];
+
+  for (const el of all) {
+    try {
+      const style = window.getComputedStyle(el);
+      const overflowY = style.overflowY || "";
+      const rect = el.getBoundingClientRect();
+
+      const canScroll =
+        (overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay") &&
+        el.scrollHeight > el.clientHeight + 80 &&
+        rect.width > 500 &&
+        rect.height > 250;
+
+      if (!canScroll) continue;
+
+      const score =
+        Math.min(rect.width, window.innerWidth) *
+        Math.min(rect.height, window.innerHeight) +
+        (el.scrollHeight - el.clientHeight);
+
+      candidates.push({ el, score });
+    } catch { /* ignore */ }
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+
+  if (candidates.length) return candidates[0].el;
+  return document.scrollingElement || document.documentElement || document.body;
+}
+
+function readMetrics(target) {
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+
+  if (isWindowScrollTarget(target)) {
+    const totalScrollHeight = Math.max(
+      document.documentElement.scrollHeight,
+      document.body ? document.body.scrollHeight : 0
+    );
+    const clientHeight = window.innerHeight;
+    const scrollY = window.scrollY || window.pageYOffset || 0;
+    const bottomReached = scrollY + clientHeight >= totalScrollHeight - 8;
+
+    return { scrollY, viewportWidth, viewportHeight, totalScrollHeight, clientHeight, bottomReached };
+  }
+
+  const scrollY = target.scrollTop || 0;
+  const totalScrollHeight = target.scrollHeight || 0;
+  const clientHeight = target.clientHeight || 0;
+  const bottomReached = scrollY + clientHeight >= totalScrollHeight - 8;
+
+  return { scrollY, viewportWidth, viewportHeight, totalScrollHeight, clientHeight, bottomReached };
+}
+
+function getScrollTop(target) {
+  if (isWindowScrollTarget(target)) return window.scrollY || window.pageYOffset || 0;
+  return target.scrollTop || 0;
+}
+
+function setScrollTop(target, value) {
+  if (isWindowScrollTarget(target)) { window.scrollTo(0, Math.max(0, value)); return; }
+  target.scrollTop = Math.max(0, value);
+}
+
+function isWindowScrollTarget(target) {
+  return (
+    target === window ||
+    target === document.body ||
+    target === document.documentElement ||
+    target === document.scrollingElement
+  );
+}
+
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
