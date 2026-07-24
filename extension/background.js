@@ -1,10 +1,39 @@
 const STORAGE_KEYS = {
   settings: "pb_guided_settings_v1",
   activeRun: "pb_guided_active_run_v1",
-  statusLog: "pb_guided_status_log_v1"
+  statusLog: "pb_guided_status_log_v1",
+  progress: "pb_guided_progress_v1"
 };
 
 let captureInProgress = false;
+let captureWatchdog = null;
+
+chrome.runtime.onInstalled.addListener(() => {
+  try {
+    chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true })
+      .catch((err) => console.warn("setPanelBehavior failed:", err));
+  } catch (err) { console.warn("sidePanel API not available:", err); }
+});
+
+chrome.action.onClicked.addListener(async (tab) => {
+  try {
+    if (chrome.sidePanel && chrome.sidePanel.open) {
+      await chrome.sidePanel.open({ tabId: tab.id });
+    }
+  } catch (err) { console.warn("Could not open side panel:", err); }
+});
+
+function startCaptureWatchdog() {
+  clearCaptureWatchdog();
+  captureWatchdog = setTimeout(async () => {
+    captureInProgress = false;
+    await addStatus("Capture lock auto-released after timeout.", "warn");
+  }, 3 * 60 * 1000);
+}
+
+function clearCaptureWatchdog() {
+  if (captureWatchdog) { clearTimeout(captureWatchdog); captureWatchdog = null; }
+}
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
@@ -15,175 +44,153 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           await storageSet({
             [STORAGE_KEYS.activeRun]: run,
             [STORAGE_KEYS.settings]: {
-              clientName: run.clientName,
-              dashboardUrl: run.dashboardUrl,
-              backendUrl: run.backendUrl
+              clientName: run.clientName, dashboardUrl: run.dashboardUrl, backendUrl: run.backendUrl
             }
           });
+          await clearProgress();
           await addStatus(`Guided run started: ${run.runId} (${run.queue.length} steps)`, "ok");
-          sendResponse({ ok: true });
-          return;
+          sendResponse({ ok: true }); return;
         }
-
         case "MODE_B_FINISH_GUIDED_RUN": {
           const run = await getActiveRun();
           if (!run) { sendResponse({ ok: false, error: "No active run." }); return; }
-
           run.finishedAt = new Date().toISOString();
           await maybePostJson(`${stripTrailingSlash(run.backendUrl)}/finish-run`, {
-            runId: run.runId,
-            finishedAt: run.finishedAt
+            runId: run.runId, finishedAt: run.finishedAt
           });
-
           await storageRemove([STORAGE_KEYS.activeRun]);
+          await clearProgress();
           await addStatus(`Guided run finished: ${run.runId}`, "ok");
-          sendResponse({ ok: true });
-          return;
+          sendResponse({ ok: true }); return;
         }
-
         case "MODE_B_TOGGLE_PAUSE_GUIDED_RUN": {
           const run = await getActiveRun();
           if (!run) { sendResponse({ ok: false, error: "No active run." }); return; }
-
           run.paused = !run.paused;
           await saveActiveRun(run);
           await addStatus(run.paused ? "Guided run paused." : "Guided run resumed.", "warn");
-          sendResponse({ ok: true });
-          return;
+          sendResponse({ ok: true }); return;
         }
-
         case "MODE_B_SKIP_CURRENT_STEP": {
           const run = await getActiveRun();
           if (!run) { sendResponse({ ok: false, error: "No active run." }); return; }
-
           const step = run.queue?.[run.currentIndex];
           if (!step) { sendResponse({ ok: false, error: "No current step to skip." }); return; }
-
-          step.status = "skipped";
-          step.skippedAt = new Date().toISOString();
+          step.status = "skipped"; step.skippedAt = new Date().toISOString();
           await addStatus(`Skipped: ${stepLabel(step)}`, "warn");
-
           run.currentIndex += 1;
           if (run.currentIndex >= run.queue.length) {
             run.finishedAt = new Date().toISOString();
             await addStatus(`Guided run completed: ${run.runId}`, "ok");
           }
-
           await saveActiveRun(run);
-          sendResponse({ ok: true });
-          return;
+          sendResponse({ ok: true }); return;
         }
-
         case "MODE_B_DONE_CAPTURE_CURRENT_STEP": {
           const result = await captureCurrentGuidedStep(false);
-          sendResponse(result);
-          return;
+          sendResponse(result); return;
         }
-
         case "MODE_B_RETRY_CURRENT_STEP": {
           const result = await captureCurrentGuidedStep(true);
-          sendResponse(result);
-          return;
+          sendResponse(result); return;
         }
-
         case "MODE_B_MANUAL_CAPTURE_CURRENT_STATE": {
           const result = await captureManualState(message.payload);
-          sendResponse(result);
-          return;
+          sendResponse(result); return;
         }
-
+        case "MODE_B_RESET_CAPTURE_LOCK": {
+          captureInProgress = false; clearCaptureWatchdog();
+          await addStatus("Capture lock manually reset.", "warn");
+          sendResponse({ ok: true }); return;
+        }
         default:
-          sendResponse({ ok: false, error: `Unknown message type: ${message.type}` });
-          return;
+          sendResponse({ ok: false, error: `Unknown message type: ${message.type}` }); return;
       }
     } catch (err) {
       await addStatus(`Background error: ${err.message}`, "error");
       sendResponse({ ok: false, error: err.message });
     }
   })();
-
   return true;
 });
 
 async function captureCurrentGuidedStep(isRetry) {
   if (captureInProgress) return { ok: false, error: "Another capture is already in progress." };
-
   const run = await getActiveRun();
   if (!run) return { ok: false, error: "No active run." };
   if (run.paused) return { ok: false, error: "Run is paused." };
-
   const step = run.queue?.[run.currentIndex];
   if (!step) return { ok: false, error: "No current step." };
 
   captureInProgress = true;
+  startCaptureWatchdog();
 
   try {
-    step.status = "in_progress";
-    step.startedAt = new Date().toISOString();
+    step.status = "in_progress"; step.startedAt = new Date().toISOString();
     await saveActiveRun(run);
 
-    await addStatus(`${isRetry ? "Retrying" : "Capturing"} step: ${stepLabel(step)}`, "ok");
+    await setProgress({
+      phase: "capturing", captureProgress: 5, uploadProgress: 0, extractionProgress: 0,
+      message: `Capturing ${stepLabel(step)}`, runId: run.runId, stateId: ""
+    });
 
     const tab = await getActivePowerBITab();
     if (!tab?.id) {
-      step.status = "failed";
-      step.failedAt = new Date().toISOString();
-      await saveActiveRun(run);
+      step.status = "failed"; step.failedAt = new Date().toISOString();
+      await saveActiveRun(run); await failProgress("No active Power BI tab found.");
       return { ok: false, error: "No active Power BI tab found." };
     }
 
     const captureResult = await captureFullStateFromActiveTab(tab.id);
     if (!captureResult.ok) {
-      step.status = "failed";
-      step.failedAt = new Date().toISOString();
-      await saveActiveRun(run);
-      await addStatus(`Capture failed: ${captureResult.error}`, "error");
+      step.status = "failed"; step.failedAt = new Date().toISOString();
+      await saveActiveRun(run); await failProgress(captureResult.error);
       return captureResult;
     }
 
+    const stateId = `state_${Date.now()}`;
     const statePayload = {
-      runId: run.runId,
-      stateId: `state_${Date.now()}`,
-      stepId: step.stepId,
-      clientName: run.clientName,
-      dashboardUrl: run.dashboardUrl,
-      pageName: step.pageName,
-      stateType: step.stateType,
-      filterName: step.filterName || "",
-      filterValue: step.filterValue || "",
-      capturedAt: new Date().toISOString(),
-      slices: captureResult.slices
+      runId: run.runId, stateId, stepId: step.stepId,
+      clientName: run.clientName, dashboardUrl: run.dashboardUrl,
+      pageName: step.pageName, stateType: step.stateType,
+      filterName: step.filterName || "", filterValue: step.filterValue || "",
+      capturedAt: new Date().toISOString(), slices: captureResult.slices
     };
+
+    await setProgress({
+      phase: "uploading", captureProgress: 100, uploadProgress: 5, extractionProgress: 0,
+      message: `Uploading ${captureResult.slices.length} slices`, runId: run.runId, stateId
+    });
 
     const postResult = await postCaptureState(run.backendUrl, statePayload);
     if (!postResult.ok) {
-      step.status = "failed";
-      step.failedAt = new Date().toISOString();
-      await saveActiveRun(run);
-      await addStatus(`Upload failed: ${postResult.error}`, "error");
+      step.status = "failed"; step.failedAt = new Date().toISOString();
+      await saveActiveRun(run); await failProgress(postResult.error);
       return { ok: false, error: postResult.error };
     }
 
-    step.status = "completed";
-    step.completedAt = new Date().toISOString();
-    step.sliceCount = captureResult.slices.length;
-    run.currentIndex += 1;
+    step.status = "completed"; step.completedAt = new Date().toISOString();
+    step.sliceCount = captureResult.slices.length; run.currentIndex += 1;
 
     if (run.currentIndex >= run.queue.length) {
       run.finishedAt = new Date().toISOString();
       await addStatus(`Guided run completed: ${run.runId}`, "ok");
     } else {
       const nextStep = run.queue[run.currentIndex];
-      await addStatus(
-        `Completed ${stepLabel(step)} (${captureResult.slices.length} slices). Next: ${stepLabel(nextStep)}`,
-        "ok"
-      );
+      await addStatus(`Uploaded ${stepLabel(step)} (${captureResult.slices.length} slices). Next: ${stepLabel(nextStep)}`, "ok");
     }
-
     await saveActiveRun(run);
+
+    await setProgress({
+      phase: "extracting", captureProgress: 100, uploadProgress: 100, extractionProgress: 15,
+      message: "Upload complete. Extraction running on backend.", runId: run.runId, stateId
+    });
+
+    pollExtractionStatus(run.backendUrl, run.runId, stateId).catch(() => {});
     return { ok: true, message: `Captured ${captureResult.slices.length} slices for ${stepLabel(step)}` };
   } finally {
     captureInProgress = false;
+    clearCaptureWatchdog();
   }
 }
 
@@ -192,48 +199,75 @@ async function captureManualState(payload) {
   if (!payload?.backendUrl) return { ok: false, error: "Missing backend URL." };
 
   captureInProgress = true;
+  startCaptureWatchdog();
 
   try {
     await addStatus(`Manual capture requested: ${manualLabel(payload)}`, "ok");
+    await setProgress({
+      phase: "capturing", captureProgress: 5, uploadProgress: 0, extractionProgress: 0,
+      message: `Manual capture: ${manualLabel(payload)}`, runId: "", stateId: ""
+    });
 
     const tab = await getActivePowerBITab();
     if (!tab?.id) return { ok: false, error: "No active Power BI tab found." };
 
     const captureResult = await captureFullStateFromActiveTab(tab.id);
-    if (!captureResult.ok) {
-      await addStatus(`Manual capture failed: ${captureResult.error}`, "error");
-      return captureResult;
-    }
+    if (!captureResult.ok) { await failProgress(captureResult.error); return captureResult; }
 
+    const runId = `manual_run_${Date.now()}`; const stateId = `manual_state_${Date.now()}`;
     const statePayload = {
-      runId: `manual_run_${Date.now()}`,
-      stateId: `manual_state_${Date.now()}`,
-      stepId: "",
-      clientName: payload.clientName || "",
-      dashboardUrl: payload.dashboardUrl || "",
-      pageName: payload.pageName || "",
-      stateType: payload.stateType || "baseline",
-      filterName: payload.filterName || "",
-      filterValue: payload.filterValue || "",
-      capturedAt: new Date().toISOString(),
-      slices: captureResult.slices
+      runId, stateId, stepId: "",
+      clientName: payload.clientName || "", dashboardUrl: payload.dashboardUrl || "",
+      pageName: payload.pageName || "", stateType: payload.stateType || "baseline",
+      filterName: payload.filterName || "", filterValue: payload.filterValue || "",
+      capturedAt: new Date().toISOString(), slices: captureResult.slices
     };
 
+    await setProgress({
+      phase: "uploading", captureProgress: 100, uploadProgress: 5, extractionProgress: 0,
+      message: `Uploading ${captureResult.slices.length} slices`, runId, stateId
+    });
+
     const postResult = await postCaptureState(payload.backendUrl, statePayload);
-    if (!postResult.ok) {
-      await addStatus(`Manual upload failed: ${postResult.error}`, "error");
-      return { ok: false, error: postResult.error };
-    }
+    if (!postResult.ok) { await failProgress(postResult.error); return { ok: false, error: postResult.error }; }
 
-    await addStatus(
-      `Manual capture uploaded: ${manualLabel(payload)} (${captureResult.slices.length} slices)`,
-      "ok"
-    );
+    await setProgress({
+      phase: "extracting", captureProgress: 100, uploadProgress: 100, extractionProgress: 15,
+      message: "Upload complete. Extraction running on backend.", runId, stateId
+    });
 
+    pollExtractionStatus(payload.backendUrl, runId, stateId).catch(() => {});
     return { ok: true, message: `Manual capture uploaded (${captureResult.slices.length} slices)` };
   } finally {
     captureInProgress = false;
+    clearCaptureWatchdog();
   }
+}
+
+async function pollExtractionStatus(backendUrl, runId, stateId) {
+  const start = Date.now();
+  const maxMs = 5 * 60 * 1000;
+  while (Date.now() - start < maxMs) {
+    try {
+      const res = await fetch(`${stripTrailingSlash(backendUrl)}/state-status?runId=${encodeURIComponent(runId)}&stateId=${encodeURIComponent(stateId)}`);
+      if (res.ok) {
+        const json = await res.json();
+        const s = json.status || {};
+        const extractionProgress = s.progress ?? 20;
+        await setProgress({
+          phase: s.stage === "done" ? "done" : s.stage === "failed" ? "failed" : "extracting",
+          captureProgress: 100, uploadProgress: 100, extractionProgress,
+          message: s.message || "", runId, stateId
+        });
+        if (s.stage === "done" || s.stage === "failed") return;
+      }
+    } catch (_e) { /* silent retry */ }
+    await sleep(2000);
+  }
+  await setProgress({
+    phase: "failed", captureProgress: 100, uploadProgress: 100, extractionProgress: 100,
+    message: "Timed out waiting for extraction status.", runId, stateId
+  });
 }
 
 async function captureFullStateFromActiveTab(tabId) {
@@ -250,19 +284,14 @@ async function captureFullStateFromActiveTab(tabId) {
     if (!metrics.ok) return { ok: false, error: `Could not read scroll metrics: ${metrics.error}` };
 
     const scrollY = Math.round(metrics.scrollY || 0);
-
-    if (seenScrollY.has(scrollY) && i > 0) {
-      await addStatus(`Stopping capture on duplicate scroll position y=${scrollY}`, "warn");
-      break;
-    }
+    if (seenScrollY.has(scrollY) && i > 0) break;
     seenScrollY.add(scrollY);
 
     const screenshot = await captureVisibleCurrentWindow();
     if (!screenshot.ok) return { ok: false, error: screenshot.error || "Screenshot failed." };
 
     slices.push({
-      sliceIndex: i + 1,
-      scrollY,
+      sliceIndex: i + 1, scrollY,
       viewportWidth: metrics.viewportWidth || 0,
       viewportHeight: metrics.viewportHeight || 0,
       totalScrollHeight: metrics.totalScrollHeight || 0,
@@ -271,25 +300,21 @@ async function captureFullStateFromActiveTab(tabId) {
       imageDataUrl: screenshot.dataUrl
     });
 
+    const captureProgress = Math.min(90, 10 + Math.floor((i + 1) * (80 / maxSlices)));
+    await setProgress({
+      phase: "capturing", captureProgress, uploadProgress: 0, extractionProgress: 0,
+      message: `Captured slice ${i + 1} at y=${scrollY}`
+    });
     await addStatus(`Captured slice ${i + 1} at y=${scrollY}`, "ok");
 
-    if (metrics.bottomReached) {
-      await addStatus(`Reached bottom at slice ${i + 1}`, "ok");
-      break;
-    }
+    if (metrics.bottomReached) break;
 
     const next = await sendTabMessage(tabId, { type: "MODE_B_SCROLL_NEXT" });
     if (!next.ok) return { ok: false, error: `Scroll failed: ${next.error}` };
-    if (!next.changed) {
-      await addStatus(`Stopping capture because scroll did not change`, "warn");
-      break;
-    }
+    if (!next.changed) break;
 
     const nextY = Math.round(next.scrollY || 0);
-    if (lastNextY !== null && nextY === lastNextY) {
-      await addStatus(`Stopping capture because next y repeated (${nextY})`, "warn");
-      break;
-    }
+    if (lastNextY !== null && nextY === lastNextY) break;
     lastNextY = nextY;
 
     await sleep(350);
@@ -306,17 +331,13 @@ async function postCaptureState(backendUrl, payload) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
     });
-
     if (!res.ok) {
       const text = await safeReadText(res);
       return { ok: false, error: `HTTP ${res.status}${text ? `: ${text}` : ""}` };
     }
-
     const json = await res.json().catch(() => ({}));
     return { ok: true, data: json };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
+  } catch (err) { return { ok: false, error: err.message }; }
 }
 
 async function maybePostJson(url, body) {
@@ -358,22 +379,28 @@ async function getActiveRun() {
   const data = await storageGet([STORAGE_KEYS.activeRun]);
   return data[STORAGE_KEYS.activeRun] || null;
 }
-
-async function saveActiveRun(run) {
-  await storageSet({ [STORAGE_KEYS.activeRun]: run });
-}
+async function saveActiveRun(run) { await storageSet({ [STORAGE_KEYS.activeRun]: run }); }
 
 async function addStatus(text, tone = "info") {
   const data = await storageGet([STORAGE_KEYS.statusLog]);
   const logs = data[STORAGE_KEYS.statusLog] || [];
-  logs.unshift({
-    ts: new Date().toLocaleString(),
-    text,
-    tone
-  });
-
+  logs.unshift({ ts: new Date().toLocaleString(), text, tone });
   await storageSet({ [STORAGE_KEYS.statusLog]: logs.slice(0, 200) });
 }
+
+async function setProgress(patch) {
+  const data = await storageGet([STORAGE_KEYS.progress]);
+  const prev = data[STORAGE_KEYS.progress] || {};
+  const next = { ...prev, ...patch, updatedAt: new Date().toISOString() };
+  await storageSet({ [STORAGE_KEYS.progress]: next });
+}
+async function failProgress(err) {
+  await setProgress({
+    phase: "failed", captureProgress: 100, uploadProgress: 100, extractionProgress: 100,
+    message: `Failed: ${err || "unknown"}`
+  });
+}
+async function clearProgress() { await storageSet({ [STORAGE_KEYS.progress]: null }); }
 
 function stepLabel(step) {
   if (!step) return "Unknown step";
@@ -381,35 +408,15 @@ function stepLabel(step) {
     ? `${step.pageName} → Baseline`
     : `${step.pageName} → ${step.filterName} = ${step.filterValue}`;
 }
-
 function manualLabel(payload) {
   return payload.stateType === "baseline"
     ? `${payload.pageName} → Baseline`
     : `${payload.pageName} → ${payload.filterName} = ${payload.filterValue}`;
 }
-
-function stripTrailingSlash(url) {
-  return String(url || "").replace(/\/+$/, "");
-}
-
-async function safeReadText(res) {
-  try { return await res.text(); } catch { return ""; }
-}
-
+function stripTrailingSlash(url) { return String(url || "").replace(/\/+$/, ""); }
+async function safeReadText(res) { try { return await res.text(); } catch { return ""; } }
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
-function storageGet(keys) {
-  return new Promise(resolve => {
-    chrome.storage.local.get(keys, result => resolve(result || {}));
-  });
-}
-function storageSet(obj) {
-  return new Promise(resolve => {
-    chrome.storage.local.set(obj, () => resolve());
-  });
-}
-function storageRemove(keys) {
-  return new Promise(resolve => {
-    chrome.storage.local.remove(keys, () => resolve());
-  });
-}
+function storageGet(keys) { return new Promise(resolve => chrome.storage.local.get(keys, r => resolve(r || {}))); }
+function storageSet(obj) { return new Promise(resolve => chrome.storage.local.set(obj, () => resolve())); }
+function storageRemove(keys) { return new Promise(resolve => chrome.storage.local.remove(keys, () => resolve())); }

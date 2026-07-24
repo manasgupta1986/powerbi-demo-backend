@@ -19,7 +19,8 @@ const STORAGE_KEYS = {
   activeRun: "pb_guided_active_run_v1",
   statusLog: "pb_guided_status_log_v1",
   chatHistory: "pb_guided_chat_history_v1",
-  manualDraft: "pb_guided_manual_draft_v1"
+  manualDraft: "pb_guided_manual_draft_v1",
+  progress: "pb_guided_progress_v1"
 };
 
 const els = {};
@@ -70,12 +71,21 @@ function cacheEls() {
   els.chatInput = document.getElementById("chatInput");
   els.sendChatBtn = document.getElementById("sendChatBtn");
   els.clearChatBtn = document.getElementById("clearChatBtn");
+
+  els.progressCard = document.getElementById("progressCard");
+  els.captureProgressBar = document.getElementById("captureProgressBar");
+  els.uploadProgressBar = document.getElementById("uploadProgressBar");
+  els.extractionProgressBar = document.getElementById("extractionProgressBar");
+  els.captureProgressLabel = document.getElementById("captureProgressLabel");
+  els.uploadProgressLabel = document.getElementById("uploadProgressLabel");
+  els.extractionProgressLabel = document.getElementById("extractionProgressLabel");
+  els.progressMessage = document.getElementById("progressMessage");
+  els.resetLockBtn = document.getElementById("resetLockBtn");
 }
 
 function bindPanelTabs() {
   const buttons = document.querySelectorAll(".tab-btn");
   const panels = document.querySelectorAll(".panel");
-
   buttons.forEach(btn => {
     btn.addEventListener("click", () => {
       buttons.forEach(x => x.classList.remove("active"));
@@ -107,12 +117,10 @@ function renderManualFallbackOptions() {
     `<option value="">Select tab</option>`,
     ...PAGE_OPTIONS.map(p => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`)
   ].join("");
-
   els.manualFilterName.innerHTML = [
     `<option value="">Select filter</option>`,
     ...FILTER_CONFIG.map(f => `<option value="${escapeHtml(f.filterName)}">${escapeHtml(f.filterName)}</option>`)
   ].join("");
-
   refreshManualFilterValues(true);
 }
 
@@ -140,6 +148,12 @@ function bindEvents() {
 
   els.sendChatBtn.addEventListener("click", onSendChat);
   els.clearChatBtn.addEventListener("click", onClearChat);
+
+  els.resetLockBtn.addEventListener("click", async () => {
+    const response = await sendRuntimeMessage({ type: "MODE_B_RESET_CAPTURE_LOCK" });
+    if (response.ok) await addLocalStatus("Capture lock reset.", "ok");
+    else await addLocalStatus("Could not reset lock.", "error");
+  });
 }
 
 async function loadSavedState() {
@@ -166,12 +180,13 @@ async function renderFromStorage() {
   const data = await storageGet([
     STORAGE_KEYS.activeRun,
     STORAGE_KEYS.statusLog,
-    STORAGE_KEYS.chatHistory
+    STORAGE_KEYS.chatHistory,
+    STORAGE_KEYS.progress
   ]);
-
   renderActiveRun(data[STORAGE_KEYS.activeRun] || null);
   renderStatusLog(data[STORAGE_KEYS.statusLog] || []);
   renderChatHistory(data[STORAGE_KEYS.chatHistory] || []);
+  renderProgress(data[STORAGE_KEYS.progress] || null);
 }
 
 function renderActiveRun(run) {
@@ -260,7 +275,6 @@ function renderStatusLog(logs) {
     `;
     return;
   }
-
   els.statusLog.innerHTML = logs.map(log => `
     <div class="log-item ${escapeHtml(log.tone || "info")}">
       <div class="log-time">${escapeHtml(log.ts || "")}</div>
@@ -279,15 +293,48 @@ function renderChatHistory(history) {
     `;
     return;
   }
-
   els.chatHistory.innerHTML = history.map(msg => `
     <div class="msg ${escapeHtml(msg.role)}">
       <div class="msg-label">${escapeHtml(msg.role)}</div>
       ${escapeHtml(msg.text)}
     </div>
   `).join("");
-
   els.chatHistory.scrollTop = els.chatHistory.scrollHeight;
+}
+
+function renderProgress(progress) {
+  if (!progress) {
+    els.progressCard.classList.remove("active");
+    return;
+  }
+  els.progressCard.classList.add("active");
+
+  const cap = Math.max(0, Math.min(100, Number(progress.captureProgress || 0)));
+  const up = Math.max(0, Math.min(100, Number(progress.uploadProgress || 0)));
+  const ex = Math.max(0, Math.min(100, Number(progress.extractionProgress || 0)));
+
+  els.captureProgressBar.style.width = `${cap}%`;
+  els.uploadProgressBar.style.width = `${up}%`;
+  els.extractionProgressBar.style.width = `${ex}%`;
+
+  els.captureProgressLabel.textContent = `${cap}%`;
+  els.uploadProgressLabel.textContent = `${up}%`;
+  els.extractionProgressLabel.textContent = `${ex}%`;
+
+  els.captureProgressBar.classList.remove("done", "failed");
+  els.uploadProgressBar.classList.remove("done", "failed");
+  els.extractionProgressBar.classList.remove("done", "failed");
+
+  if (progress.phase === "done") {
+    els.captureProgressBar.classList.add("done");
+    els.uploadProgressBar.classList.add("done");
+    els.extractionProgressBar.classList.add("done");
+  }
+  if (progress.phase === "failed") {
+    els.extractionProgressBar.classList.add("failed");
+  }
+
+  els.progressMessage.textContent = progress.message || "";
 }
 
 async function onSaveSettings() {
@@ -310,7 +357,6 @@ function collectSettings() {
 function getSelectedTabs() {
   return [...document.querySelectorAll(".guided-tab:checked")].map(x => x.value);
 }
-
 function getSelectedFilters() {
   return [...document.querySelectorAll(".guided-filter:checked")].map(x => x.value);
 }
@@ -319,46 +365,31 @@ function buildGuidedQueue(tabs, filters, includeBaseline) {
   const queue = [];
   let order = 1;
   const baseStamp = Date.now();
-
   for (const pageName of tabs) {
     if (includeBaseline) {
       queue.push({
-        stepId: `step_${baseStamp}_${order}`,
-        order,
-        pageName,
-        stateType: "baseline",
-        filterName: "",
-        filterValue: "",
-        status: "pending"
+        stepId: `step_${baseStamp}_${order}`, order, pageName,
+        stateType: "baseline", filterName: "", filterValue: "", status: "pending"
       });
       order += 1;
     }
-
     for (const filterName of filters) {
       const def = FILTER_MAP[filterName];
       if (!def) continue;
-
       for (const option of def.options) {
         queue.push({
-          stepId: `step_${baseStamp}_${order}`,
-          order,
-          pageName,
-          stateType: "filtered",
-          filterName,
-          filterValue: option,
-          status: "pending"
+          stepId: `step_${baseStamp}_${order}`, order, pageName,
+          stateType: "filtered", filterName, filterValue: option, status: "pending"
         });
         order += 1;
       }
     }
   }
-
   return queue;
 }
 
 async function onStartGuidedRun() {
   const settings = collectSettings();
-
   if (!settings.clientName) { await addLocalStatus("Client name is required.", "error"); return; }
   if (!settings.dashboardUrl) { await addLocalStatus("Dashboard URL is required.", "error"); return; }
   if (!settings.backendUrl) { await addLocalStatus("Backend URL is required.", "error"); return; }
@@ -369,66 +400,52 @@ async function onStartGuidedRun() {
 
   if (!selectedTabs.length) { await addLocalStatus("Select at least one tab.", "error"); return; }
   if (!includeBaseline && !selectedFilters.length) {
-    await addLocalStatus("Select at least one filter or enable baseline.", "error");
-    return;
+    await addLocalStatus("Select at least one filter or enable baseline.", "error"); return;
   }
 
   const queue = buildGuidedQueue(selectedTabs, selectedFilters, includeBaseline);
-
   const runPayload = {
     runId: `run_${Date.now()}`,
-    clientName: settings.clientName,
-    dashboardUrl: settings.dashboardUrl,
+    clientName: settings.clientName, dashboardUrl: settings.dashboardUrl,
     backendUrl: settings.backendUrl,
     mode: "GUIDED_CAPTURE_MANUAL_SET_AUTO_SCROLL",
     startedAt: new Date().toISOString(),
-    paused: false,
-    currentIndex: 0,
-    queue
+    paused: false, currentIndex: 0, queue
   };
 
   await storageSet({ [STORAGE_KEYS.settings]: settings });
-
-  const response = await sendRuntimeMessage({
-    type: "MODE_B_START_GUIDED_RUN",
-    payload: runPayload
-  });
-
-  if (response.ok) {
-    await addLocalStatus(`Guided run started with ${queue.length} steps.`, "ok");
-  } else {
-    await addLocalStatus(`Could not start guided run: ${response.error || "Unknown error"}`, "error");
-  }
-
+  const response = await sendRuntimeMessage({ type: "MODE_B_START_GUIDED_RUN", payload: runPayload });
+  if (response.ok) await addLocalStatus(`Guided run started with ${queue.length} steps.`, "ok");
+  else await addLocalStatus(`Could not start guided run: ${response.error || "Unknown error"}`, "error");
   await renderFromStorage();
 }
 
 async function onFinishRun() {
   const response = await sendRuntimeMessage({ type: "MODE_B_FINISH_GUIDED_RUN" });
-
-  if (response.ok) {
-    await addLocalStatus("Active run finished.", "ok");
-  } else {
-    await addLocalStatus(`Could not finish run: ${response.error || "Unknown error"}`, "error");
-  }
-
+  if (response.ok) await addLocalStatus("Active run finished.", "ok");
+  else await addLocalStatus(`Could not finish run: ${response.error || "Unknown error"}`, "error");
+  await storageSet({ [STORAGE_KEYS.progress]: null });
   await renderFromStorage();
 }
 
 async function onGuidedAction(type) {
-  const response = await sendRuntimeMessage({ type });
-
-  if (!response.ok) {
-    await addLocalStatus(response.error || "Action failed.", "error");
+  if (type === "MODE_B_DONE_CAPTURE_CURRENT_STEP" || type === "MODE_B_RETRY_CURRENT_STEP") {
+    await storageSet({
+      [STORAGE_KEYS.progress]: {
+        phase: "capturing", captureProgress: 1, uploadProgress: 0, extractionProgress: 0,
+        message: "Starting capture...", updatedAt: new Date().toISOString()
+      }
+    });
+    await renderFromStorage();
   }
 
+  const response = await sendRuntimeMessage({ type });
+  if (!response.ok) await addLocalStatus(response.error || "Action failed.", "error");
   await renderFromStorage();
 }
 
 function onManualStateChanged() {
-  if (els.manualStateType.value !== "filtered") {
-    els.manualFilterName.value = "";
-  }
+  if (els.manualStateType.value !== "filtered") els.manualFilterName.value = "";
   refreshManualFilterValues(false);
   saveManualDraft();
 }
@@ -440,14 +457,12 @@ function onManualFilterChanged() {
 
 function refreshManualFilterValues(keepValue = false) {
   const prev = keepValue ? els.manualFilterValue.value : "";
-
   if (els.manualStateType.value !== "filtered") {
     els.manualFilterName.disabled = true;
     els.manualFilterValue.disabled = true;
     els.manualFilterValue.innerHTML = `<option value="">Not needed for baseline</option>`;
     return;
   }
-
   els.manualFilterName.disabled = false;
   els.manualFilterValue.disabled = false;
 
@@ -456,16 +471,12 @@ function refreshManualFilterValues(keepValue = false) {
     els.manualFilterValue.innerHTML = `<option value="">Select filter first</option>`;
     return;
   }
-
   const def = FILTER_MAP[filterName];
   els.manualFilterValue.innerHTML = [
     `<option value="">Select value</option>`,
     ...def.options.map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`)
   ].join("");
-
-  if (prev && def.options.includes(prev)) {
-    els.manualFilterValue.value = prev;
-  }
+  if (prev && def.options.includes(prev)) els.manualFilterValue.value = prev;
 }
 
 async function saveManualDraft() {
@@ -494,25 +505,26 @@ async function onManualCapture() {
 
   await saveManualDraft();
 
+  await storageSet({
+    [STORAGE_KEYS.progress]: {
+      phase: "capturing", captureProgress: 1, uploadProgress: 0, extractionProgress: 0,
+      message: "Starting manual capture...", updatedAt: new Date().toISOString()
+    }
+  });
+  await renderFromStorage();
+
   const response = await sendRuntimeMessage({
     type: "MODE_B_MANUAL_CAPTURE_CURRENT_STATE",
     payload: {
-      pageName,
-      stateType,
-      filterName,
-      filterValue,
+      pageName, stateType, filterName, filterValue,
       clientName: settings.clientName || "",
       dashboardUrl: settings.dashboardUrl || "",
       backendUrl: settings.backendUrl || ""
     }
   });
 
-  if (response.ok) {
-    await addLocalStatus("Manual capture requested.", "ok");
-  } else {
-    await addLocalStatus(`Manual capture failed: ${response.error || "Unknown error"}`, "error");
-  }
-
+  if (response.ok) await addLocalStatus("Manual capture requested.", "ok");
+  else await addLocalStatus(`Manual capture failed: ${response.error || "Unknown error"}`, "error");
   await renderFromStorage();
 }
 
@@ -525,15 +537,12 @@ async function onLoadLatestRun() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     await addLocalStatus(buildLatestRunSummary(data), "ok");
-  } catch (err) {
-    await addLocalStatus(`Could not load latest saved run: ${err.message}`, "error");
-  }
+  } catch (err) { await addLocalStatus(`Could not load latest saved run: ${err.message}`, "error"); }
 }
 
 async function onOpenLatestReport() {
   const settings = collectSettings();
   if (!settings.backendUrl) { await addLocalStatus("Backend URL is required.", "error"); return; }
-
   window.open(`${settings.backendUrl}/latest-report`, "_blank");
   await addLocalStatus("Opened latest report.", "ok");
 }
@@ -584,7 +593,6 @@ async function onClearChat() {
 function buildLatestRunSummary(data) {
   if (!data) return "Latest run returned empty response.";
   if (typeof data === "string") return `Latest run: ${data}`;
-
   const parts = ["Latest run loaded."];
   if (data.runId) parts.push(`runId=${data.runId}`);
   if (data.clientName) parts.push(`client=${data.clientName}`);
@@ -598,7 +606,6 @@ async function appendChat(role, text) {
   const data = await storageGet([STORAGE_KEYS.chatHistory]);
   const history = data[STORAGE_KEYS.chatHistory] || [];
   history.push({ role, text, ts: new Date().toISOString() });
-
   await storageSet({ [STORAGE_KEYS.chatHistory]: history.slice(-50) });
   await renderFromStorage();
 }
@@ -606,25 +613,14 @@ async function appendChat(role, text) {
 async function addLocalStatus(text, tone = "info") {
   const data = await storageGet([STORAGE_KEYS.statusLog]);
   const logs = data[STORAGE_KEYS.statusLog] || [];
-  logs.unshift({
-    ts: new Date().toLocaleString(),
-    text,
-    tone
-  });
-
+  logs.unshift({ ts: new Date().toLocaleString(), text, tone });
   await storageSet({ [STORAGE_KEYS.statusLog]: logs.slice(0, 150) });
 }
 
-function normalizeUrl(url) {
-  return url.replace(/\/+$/, "");
-}
-
+function normalizeUrl(url) { return url.replace(/\/+$/, ""); }
 function debounce(fn, wait) {
   let t = null;
-  return (...args) => {
-    clearTimeout(t);
-    t = setTimeout(() => fn(...args), wait);
-  };
+  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), wait); };
 }
 
 function escapeHtml(value) {
@@ -637,17 +633,11 @@ function escapeHtml(value) {
 }
 
 function storageGet(keys) {
-  return new Promise(resolve => {
-    chrome.storage.local.get(keys, result => resolve(result || {}));
-  });
+  return new Promise(resolve => chrome.storage.local.get(keys, result => resolve(result || {})));
 }
-
 function storageSet(obj) {
-  return new Promise(resolve => {
-    chrome.storage.local.set(obj, () => resolve());
-  });
+  return new Promise(resolve => chrome.storage.local.set(obj, () => resolve()));
 }
-
 function sendRuntimeMessage(message) {
   return new Promise(resolve => {
     try {
@@ -658,8 +648,6 @@ function sendRuntimeMessage(message) {
         }
         resolve(response || { ok: true });
       });
-    } catch (err) {
-      resolve({ ok: false, error: err.message });
-    }
+    } catch (err) { resolve({ ok: false, error: err.message }); }
   });
 }
