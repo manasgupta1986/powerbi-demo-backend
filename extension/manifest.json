@@ -3,7 +3,7 @@
   "name": "PowerBI Demo Assistant",
   "version": "4.0.0",
   "description": "Guided semi-automated Power BI capture assistant with AI extraction and closed-book Q&A",
-  "permissions": ["storage", "tabs", "activeTab", "sidePanel"],
+  "permissions": ["storage", "tabs", "activeTab", "sidePanel","scripting"],
   "host_permissions": [
     "https://app.powerbi.com/*",
     "https://*.powerbi.com/*",

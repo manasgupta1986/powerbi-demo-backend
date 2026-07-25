@@ -33,7 +33,6 @@ function startKeepAlive() {
 function stopKeepAlive() {
   if (keepAliveTimer) { clearInterval(keepAliveTimer); keepAliveTimer = null; }
 }
-
 function startCaptureWatchdog() {
   clearCaptureWatchdog();
   captureWatchdog = setTimeout(async () => {
@@ -135,6 +134,8 @@ async function captureCurrentGuidedStep(isRetry) {
   const step = run.queue?.[run.currentIndex];
   if (!step) return { ok: false, error: "No current step." };
 
+  clearCaptureWatchdog();
+  stopKeepAlive();
   captureInProgress = true;
   startCaptureWatchdog();
   startKeepAlive();
@@ -208,6 +209,8 @@ async function captureManualState(payload) {
   if (captureInProgress) return { ok: false, error: "Another capture is already in progress." };
   if (!payload?.backendUrl) return { ok: false, error: "Missing backend URL." };
 
+  clearCaptureWatchdog();
+  stopKeepAlive();
   captureInProgress = true;
   startCaptureWatchdog();
   startKeepAlive();
@@ -261,6 +264,7 @@ async function uploadSlicesInChunks(backendUrl, meta, slices) {
   });
 
   try {
+    console.log(`[upload] start: run=${meta.runId} state=${meta.stateId} slices=${total}`);
     const startRes = await fetch(`${base}/capture-state/start`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -276,6 +280,7 @@ async function uploadSlicesInChunks(backendUrl, meta, slices) {
 
   for (let i = 0; i < slices.length; i++) {
     const slice = slices[i];
+    console.log(`[upload] slice ${slice.sliceIndex} of ${total} starting`);
     const sliceBody = {
       runId: meta.runId,
       stateId: meta.stateId,
@@ -299,14 +304,18 @@ async function uploadSlicesInChunks(backendUrl, meta, slices) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(sliceBody)
         });
+        console.log(`[upload] slice ${slice.sliceIndex} attempt ${attempt} status ${res.status}`);
         if (res.ok) { lastErr = ""; break; }
         const text = await safeReadText(res);
         lastErr = `HTTP ${res.status}${text ? `: ${text}` : ""}`;
       } catch (err) {
         lastErr = err.message;
+        console.warn(`[upload] slice ${slice.sliceIndex} attempt ${attempt} error ${err.message}`);
       }
       await sleep(500 * attempt);
     }
+
+    slice.imageDataUrl = "";
 
     if (lastErr) return { ok: false, error: `Slice ${slice.sliceIndex} upload failed: ${lastErr}` };
 
@@ -318,6 +327,7 @@ async function uploadSlicesInChunks(backendUrl, meta, slices) {
   }
 
   try {
+    console.log(`[upload] finishing: run=${meta.runId} state=${meta.stateId}`);
     const finRes = await fetch(`${base}/capture-state/finish`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -366,6 +376,8 @@ async function pollExtractionStatus(backendUrl, runId, stateId) {
 }
 
 async function captureFullStateFromActiveTab(tabId) {
+  await sleep(800);
+
   const reset = await sendTabMessage(tabId, { type: "MODE_B_RESET_SCROLL_TOP" });
   if (!reset.ok) return { ok: false, error: `Could not initialize scroll state: ${reset.error}` };
 
@@ -426,7 +438,7 @@ async function maybePostJson(url, body) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
     });
-  } catch { /* best effort */ }
+  } catch {}
 }
 
 async function getActivePowerBITab() {
@@ -470,8 +482,32 @@ function captureVisibleCurrentWindow() {
 
 function sendTabMessage(tabId, message) {
   return new Promise(resolve => {
-    chrome.tabs.sendMessage(tabId, message, response => {
-      if (chrome.runtime.lastError) { resolve({ ok: false, error: chrome.runtime.lastError.message }); return; }
+    chrome.tabs.sendMessage(tabId, message, async response => {
+      if (chrome.runtime.lastError) {
+        const errMsg = chrome.runtime.lastError.message || "";
+        const isNotConnected =
+          errMsg.includes("Receiving end does not exist") ||
+          errMsg.includes("Could not establish connection");
+        if (isNotConnected) {
+          try {
+            await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
+            await new Promise(r => setTimeout(r, 250));
+            chrome.tabs.sendMessage(tabId, message, retryResponse => {
+              if (chrome.runtime.lastError) {
+                resolve({ ok: false, error: chrome.runtime.lastError.message });
+                return;
+              }
+              resolve(retryResponse || { ok: false, error: "No response from content script after re-injection." });
+            });
+            return;
+          } catch (injectErr) {
+            resolve({ ok: false, error: `Content script re-injection failed: ${injectErr.message}` });
+            return;
+          }
+        }
+        resolve({ ok: false, error: errMsg });
+        return;
+      }
       resolve(response || { ok: false, error: "No response from content script." });
     });
   });

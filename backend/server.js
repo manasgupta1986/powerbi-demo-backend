@@ -6,7 +6,7 @@ const path = require("path");
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "40mb" }));
+app.use(express.json({ limit: "6mb" }));
 
 const PORT = process.env.PORT || 3000;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
@@ -18,9 +18,10 @@ const LATEST_REPORT_PATH = path.join(REPORTS_DIR, "latest-report.html");
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || "gpt-4o-mini";
 const OPENAI_TEXT_MODEL = process.env.OPENAI_TEXT_MODEL || "gpt-4o-mini";
-const MAX_AI_SLICES = Math.max(1, Math.min(6, Number(process.env.MAX_AI_SLICES || 4)));
+const MAX_AI_SLICES = Math.max(1, Math.min(6, Number(process.env.MAX_AI_SLICES || 2)));
 
 const extractionStatus = new Map();
+let extractionQueue = Promise.resolve();
 
 function setExtractionStatus(runId, stateId, patch) {
   const key = `${runId}::${stateId}`;
@@ -85,7 +86,6 @@ async function saveRunMetaFromMeta(meta) {
 }
 
 async function initStateMeta(meta, totalSlices) {
-  const stateDir = getStateDir(meta.runId, meta.stateId);
   await fsp.mkdir(getStateImagesDir(meta.runId, meta.stateId), { recursive: true });
   const stateMeta = {
     runId: meta.runId, stateId: meta.stateId, stepId: meta.stepId || "",
@@ -107,8 +107,13 @@ async function appendSlice(runId, stateId, sliceBody) {
   const idx = sliceBody.sliceIndex || 0;
   const fileName = `slice_${String(idx).padStart(2, "0")}.png`;
   const filePath = path.join(imagesDir, fileName);
+
   const base64 = stripDataUrlPrefix(sliceBody.imageDataUrl || "");
-  if (base64) await fsp.writeFile(filePath, Buffer.from(base64, "base64"));
+  if (base64) {
+    const buf = Buffer.from(base64, "base64");
+    await fsp.writeFile(filePath, buf);
+  }
+  sliceBody.imageDataUrl = "";
 
   const stateMetaPath = getStateMetaPath(runId, stateId);
   const stateMeta = await readJsonIfExists(stateMetaPath, null);
@@ -145,13 +150,13 @@ function selectRepresentativeSlices(slices, maxCount) {
     const ratio = indexes.size / Math.max(1, maxCount - 1);
     indexes.add(Math.min(arr.length - 1, Math.floor(ratio * (arr.length - 1))));
   }
-  const picked = [...indexes].sort((a, b) => a - b).slice(0, maxCount);
-  return picked.map((i) => arr[i]);
+  return [...indexes].sort((a, b) => a - b).slice(0, maxCount).map(i => arr[i]);
 }
 
 async function loadStateSlicesAsDataUrls(runId, stateId, stateMeta) {
+  const rep = selectRepresentativeSlices(stateMeta.slices || [], MAX_AI_SLICES);
   const arr = [];
-  for (const s of stateMeta.slices || []) {
+  for (const s of rep) {
     try {
       const buf = await fsp.readFile(s.imagePath);
       const dataUrl = `data:image/png;base64,${buf.toString("base64")}`;
@@ -254,7 +259,6 @@ function normalizeExtractionResult(raw, stateMeta) {
 
 async function analyzeStateWithAI(stateMeta, slicesWithDataUrls) {
   if (!OPENAI_API_KEY) return buildExtractionFallback(stateMeta);
-  const rep = selectRepresentativeSlices(slicesWithDataUrls, MAX_AI_SLICES);
   const content = [{
     type: "text",
     text:
@@ -264,7 +268,7 @@ async function analyzeStateWithAI(stateMeta, slicesWithDataUrls) {
       `Return strict JSON with charts, datapoints, weekMappings, executiveSummary, limitations.\n` +
       `Rules: extract approximate numbers when possible, preserve week codes exactly, do not invent values, stay closed-book.`
   }];
-  for (const s of rep) if (s?.imageDataUrl) content.push({ type: "image_url", image_url: { url: s.imageDataUrl } });
+  for (const s of slicesWithDataUrls) if (s?.imageDataUrl) content.push({ type: "image_url", image_url: { url: s.imageDataUrl } });
   const raw = await callOpenAIChatJSON({
     model: OPENAI_VISION_MODEL, temperature: 0.1,
     messages: [
@@ -315,6 +319,7 @@ function sortRowsChronologically(rows) {
     return String(a.xLabel || "").localeCompare(String(b.xLabel || ""));
   });
 }
+
 function buildHeuristicReport(latestData) {
   const rows = latestData?.extractedRows || [];
   const client = latestData?.clientName || "the client";
@@ -529,10 +534,14 @@ app.get("/health", async (req, res) => {
 app.post("/capture-state/start", async (req, res) => {
   const meta = req.body || {};
   if (!meta.runId || !meta.stateId) return res.status(400).json({ ok: false, error: "Missing runId or stateId." });
-  await saveRunMetaFromMeta(meta);
-  await initStateMeta(meta, Number(meta.totalSlices || 0));
-  setExtractionStatus(meta.runId, meta.stateId, { stage: "receiving", progress: 5, message: "State initialized. Awaiting slices." });
-  return res.json({ ok: true });
+  try {
+    await saveRunMetaFromMeta(meta);
+    await initStateMeta(meta, Number(meta.totalSlices || 0));
+    setExtractionStatus(meta.runId, meta.stateId, { stage: "receiving", progress: 5, message: "State initialized. Awaiting slices." });
+    return res.json({ ok: true });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 app.post("/capture-state/slice", async (req, res) => {
@@ -556,9 +565,18 @@ app.post("/capture-state/finish", async (req, res) => {
   if (!runId || !stateId) return res.status(400).json({ ok: false, error: "Missing runId or stateId." });
   setExtractionStatus(runId, stateId, { stage: "saved", progress: 15, message: "All slices received. Extraction queued." });
   res.json({ ok: true });
-  runExtractionInBackground(runId, stateId).catch(err => {
-    setExtractionStatus(runId, stateId, { stage: "failed", progress: 100, message: `Background extraction crashed: ${err.message}`, error: err.message, finishedAt: nowIso() });
-  });
+
+  extractionQueue = extractionQueue
+    .then(() => runExtractionInBackground(runId, stateId))
+    .catch(err => {
+      setExtractionStatus(runId, stateId, {
+        stage: "failed",
+        progress: 100,
+        message: `Background extraction crashed: ${err.message}`,
+        error: err.message,
+        finishedAt: nowIso()
+      });
+    });
 });
 
 app.get("/state-status", async (req, res) => {
@@ -601,7 +619,7 @@ app.post("/ask", async (req, res) => {
 
 ensureDirs()
   .then(() => {
-    app.listen(PORT, () => {
+    app.listen(PORT, "0.0.0.0", () => {
       console.log(`PowerBI backend listening on port ${PORT}`);
       console.log(`DATA_DIR=${DATA_DIR}`);
       console.log(`AI enabled=${!!OPENAI_API_KEY}`);
