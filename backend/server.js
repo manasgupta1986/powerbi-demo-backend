@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const analystUploadRoutes = require("./analyst/routesUpload");
 const fs = require("fs");
 const fsp = require("fs/promises");
 const path = require("path");
@@ -295,8 +296,10 @@ app.post("/ask", async (req, res) => {
   }
 });
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`PowerBI backend listening on port ${PORT}`);
+app.use("/analyst", analystUploadRoutes);
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
 
 function queueExtraction(runId, stateId) {
