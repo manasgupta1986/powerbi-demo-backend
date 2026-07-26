@@ -297,8 +297,9 @@ app.post("/ask", async (req, res) => {
 });
 
 app.use("/analyst", analystUploadRoutes);
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`PowerBI backend listening on port ${PORT}`);
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
 
 function queueExtraction(runId, stateId) {
