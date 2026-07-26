@@ -5,624 +5,675 @@ const fsp = require("fs/promises");
 const path = require("path");
 
 const app = express();
-app.use(cors());
-app.use(express.json({ limit: "6mb" }));
-
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
-const RUNS_DIR = path.join(DATA_DIR, "runs");
-const REPORTS_DIR = path.join(DATA_DIR, "reports");
-const LATEST_DATA_PATH = path.join(DATA_DIR, "latest-data.json");
-const LATEST_REPORT_PATH = path.join(REPORTS_DIR, "latest-report.html");
-
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || "gpt-4o-mini";
-const OPENAI_TEXT_MODEL = process.env.OPENAI_TEXT_MODEL || "gpt-4o-mini";
-const MAX_AI_SLICES = Math.max(1, Math.min(6, Number(process.env.MAX_AI_SLICES || 2)));
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const MAX_AI_SLICES = Number(process.env.MAX_AI_SLICES || 3);
 
-const extractionStatus = new Map();
+app.use(cors());
+app.use(express.json({ limit: "8mb" }));
+
+ensureDirSync(DATA_DIR);
+ensureDirSync(path.join(DATA_DIR, "runs"));
+
+const runCache = new Map();
 let extractionQueue = Promise.resolve();
 
-function setExtractionStatus(runId, stateId, patch) {
-  const key = `${runId}::${stateId}`;
-  const prev = extractionStatus.get(key) || {
-    runId, stateId, stage: "queued", progress: 0, message: "",
-    startedAt: nowIso(), updatedAt: nowIso(), finishedAt: "", error: ""
-  };
-  const next = { ...prev, ...patch, updatedAt: nowIso() };
-  extractionStatus.set(key, next);
-  return next;
-}
-function getExtractionStatus(runId, stateId) {
-  return extractionStatus.get(`${runId}::${stateId}`) || null;
-}
+app.get("/", (_req, res) => {
+  res.send(`
+    <html><head><title>PowerBI Demo Backend</title>
+    <style>
+      body { font-family: Arial, sans-serif; padding: 24px; color: #111827; }
+      a { color: #2563eb; }
+      .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; margin: 12px 0; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { border: 1px solid #e5e7eb; padding: 8px; text-align: left; }
+      th { background: #f9fafb; }
+    </style></head>
+    <body>
+      <h1>PowerBI Demo Backend</h1>
+      <p>Backend is running.</p>
+      <p><a href="/health">/health</a></p>
+    </body></html>
+  `);
+});
 
-async function ensureDirs() {
-  await fsp.mkdir(DATA_DIR, { recursive: true });
-  await fsp.mkdir(RUNS_DIR, { recursive: true });
-  await fsp.mkdir(REPORTS_DIR, { recursive: true });
-}
-
-function safeFileName(v) {
-  return String(v || "").replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 160) || "item";
-}
-function stripDataUrlPrefix(d) {
-  const raw = String(d || ""); const i = raw.indexOf(",");
-  return i >= 0 ? raw.slice(i + 1) : raw;
-}
-function escapeHtml(v) {
-  return String(v).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#039;");
-}
-async function readJsonIfExists(p, f = null) {
-  try { const r = await fsp.readFile(p, "utf8"); return JSON.parse(r); } catch { return f; }
-}
-async function writeJson(p, d) { await fsp.writeFile(p, JSON.stringify(d, null, 2), "utf8"); }
-function nowIso() { return new Date().toISOString(); }
-
-function getRunDir(runId) { return path.join(RUNS_DIR, safeFileName(runId)); }
-function getRunMetaPath(runId) { return path.join(getRunDir(runId), "run.json"); }
-function getStatesRoot(runId) { return path.join(getRunDir(runId), "states"); }
-function getStateDir(runId, stateId) { return path.join(getStatesRoot(runId), safeFileName(stateId)); }
-function getStateMetaPath(runId, stateId) { return path.join(getStateDir(runId, stateId), "state.json"); }
-function getStateExtractionPath(runId, stateId) { return path.join(getStateDir(runId, stateId), "extraction.json"); }
-function getStateImagesDir(runId, stateId) { return path.join(getStateDir(runId, stateId), "images"); }
-
-async function saveRunMetaFromMeta(meta) {
-  const runDir = getRunDir(meta.runId);
-  await fsp.mkdir(runDir, { recursive: true });
-  const runMetaPath = getRunMetaPath(meta.runId);
-  const existing = (await readJsonIfExists(runMetaPath, null)) || {};
-  const next = {
-    runId: meta.runId,
-    clientName: meta.clientName || existing.clientName || "",
-    dashboardUrl: meta.dashboardUrl || existing.dashboardUrl || "",
-    mode: existing.mode || "GUIDED_CAPTURE_MANUAL_SET_AUTO_SCROLL",
-    startedAt: existing.startedAt || nowIso(),
-    finishedAt: existing.finishedAt || "",
-    lastUpdatedAt: nowIso()
-  };
-  await writeJson(runMetaPath, next);
-  return next;
-}
-
-async function initStateMeta(meta, totalSlices) {
-  await fsp.mkdir(getStateImagesDir(meta.runId, meta.stateId), { recursive: true });
-  const stateMeta = {
-    runId: meta.runId, stateId: meta.stateId, stepId: meta.stepId || "",
-    clientName: meta.clientName || "", dashboardUrl: meta.dashboardUrl || "",
-    pageName: meta.pageName || "", stateType: meta.stateType || "baseline",
-    filterName: meta.filterName || "", filterValue: meta.filterValue || "",
-    capturedAt: meta.capturedAt || nowIso(),
-    expectedSliceCount: totalSlices || 0,
-    sliceCount: 0,
-    slices: []
-  };
-  await writeJson(getStateMetaPath(meta.runId, meta.stateId), stateMeta);
-  return stateMeta;
-}
-
-async function appendSlice(runId, stateId, sliceBody) {
-  const imagesDir = getStateImagesDir(runId, stateId);
-  await fsp.mkdir(imagesDir, { recursive: true });
-  const idx = sliceBody.sliceIndex || 0;
-  const fileName = `slice_${String(idx).padStart(2, "0")}.png`;
-  const filePath = path.join(imagesDir, fileName);
-
-  const base64 = stripDataUrlPrefix(sliceBody.imageDataUrl || "");
-  if (base64) {
-    const buf = Buffer.from(base64, "base64");
-    await fsp.writeFile(filePath, buf);
-  }
-  sliceBody.imageDataUrl = "";
-
-  const stateMetaPath = getStateMetaPath(runId, stateId);
-  const stateMeta = await readJsonIfExists(stateMetaPath, null);
-  if (!stateMeta) throw new Error("State not initialized. Call /capture-state/start first.");
-
-  const persisted = {
-    sliceIndex: idx,
-    scrollY: sliceBody.scrollY || 0,
-    viewportWidth: sliceBody.viewportWidth || 0,
-    viewportHeight: sliceBody.viewportHeight || 0,
-    totalScrollHeight: sliceBody.totalScrollHeight || 0,
-    clientHeight: sliceBody.clientHeight || 0,
-    capturedAt: sliceBody.capturedAt || nowIso(),
-    imageFile: fileName,
-    imagePath: filePath
-  };
-
-  stateMeta.slices = Array.isArray(stateMeta.slices) ? stateMeta.slices : [];
-  const existingIdx = stateMeta.slices.findIndex(s => s.sliceIndex === idx);
-  if (existingIdx >= 0) stateMeta.slices[existingIdx] = persisted;
-  else stateMeta.slices.push(persisted);
-  stateMeta.sliceCount = stateMeta.slices.length;
-  stateMeta.lastUpdatedAt = nowIso();
-  await writeJson(stateMetaPath, stateMeta);
-  return stateMeta;
-}
-
-function selectRepresentativeSlices(slices, maxCount) {
-  const arr = Array.isArray(slices) ? slices : [];
-  if (arr.length <= maxCount) return arr;
-  const indexes = new Set();
-  indexes.add(0); indexes.add(arr.length - 1); indexes.add(Math.floor(arr.length / 2));
-  while (indexes.size < Math.min(maxCount, arr.length)) {
-    const ratio = indexes.size / Math.max(1, maxCount - 1);
-    indexes.add(Math.min(arr.length - 1, Math.floor(ratio * (arr.length - 1))));
-  }
-  return [...indexes].sort((a, b) => a - b).slice(0, maxCount).map(i => arr[i]);
-}
-
-async function loadStateSlicesAsDataUrls(runId, stateId, stateMeta) {
-  const rep = selectRepresentativeSlices(stateMeta.slices || [], MAX_AI_SLICES);
-  const arr = [];
-  for (const s of rep) {
-    try {
-      const buf = await fsp.readFile(s.imagePath);
-      const dataUrl = `data:image/png;base64,${buf.toString("base64")}`;
-      arr.push({ ...s, imageDataUrl: dataUrl });
-    } catch { arr.push({ ...s, imageDataUrl: "" }); }
-  }
-  return arr;
-}
-
-function buildExtractionFallback(stateMeta) {
-  return {
-    aiEnabled: false, extractedAt: nowIso(),
-    stateSummary: {
-      pageName: stateMeta.pageName || "", stateType: stateMeta.stateType || "baseline",
-      filterName: stateMeta.filterName || "", filterValue: stateMeta.filterValue || "",
-      note: "AI extraction not available. Stored metadata only."
-    },
-    weekMappings: [], charts: [],
-    executiveSummary: [
-      stateMeta.stateType === "baseline"
-        ? `${stateMeta.pageName} baseline captured with ${stateMeta.sliceCount || 0} slices.`
-        : `${stateMeta.pageName} with ${stateMeta.filterName} = ${stateMeta.filterValue} captured with ${stateMeta.sliceCount || 0} slices.`
-    ],
-    limitations: ["OPENAI_API_KEY not configured, so screenshot value extraction did not run."]
-  };
-}
-
-async function callOpenAIChatJSON({ model, messages, temperature = 0.1 }) {
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${OPENAI_API_KEY}` },
-    body: JSON.stringify({ model, temperature, response_format: { type: "json_object" }, messages })
-  });
-  if (!res.ok) {
-    const t = await safeReadText(res);
-    throw new Error(`OpenAI JSON call failed: HTTP ${res.status}${t ? `: ${t}` : ""}`);
-  }
-  const j = await res.json();
-  return JSON.parse(j?.choices?.[0]?.message?.content || "{}");
-}
-async function callOpenAIChatText({ model, messages, temperature = 0.2 }) {
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${OPENAI_API_KEY}` },
-    body: JSON.stringify({ model, temperature, messages })
-  });
-  if (!res.ok) {
-    const t = await safeReadText(res);
-    throw new Error(`OpenAI text call failed: HTTP ${res.status}${t ? `: ${t}` : ""}`);
-  }
-  const j = await res.json();
-  return j?.choices?.[0]?.message?.content || "";
-}
-
-function normalizeExtractionResult(raw, stateMeta) {
-  const charts = Array.isArray(raw?.charts) ? raw.charts : [];
-  const weekMappings = Array.isArray(raw?.weekMappings) ? raw.weekMappings : [];
-  const executiveSummary = Array.isArray(raw?.executiveSummary) ? raw.executiveSummary : [];
-  const limitations = Array.isArray(raw?.limitations) ? raw.limitations : [];
-  const safeCharts = charts.map((chart, i) => {
-    const dps = Array.isArray(chart?.datapoints) ? chart.datapoints : [];
-    return {
-      chartId: chart?.chartId || `chart_${i + 1}`,
-      title: chart?.title || `Chart ${i + 1}`,
-      chartType: chart?.chartType || "",
-      xAxisLabel: chart?.xAxisLabel || "",
-      yAxisLabel: chart?.yAxisLabel || "",
-      unit: chart?.unit || "",
-      seriesNames: Array.isArray(chart?.seriesNames) ? chart.seriesNames : [],
-      datapoints: dps.map(dp => ({
-        seriesName: dp?.seriesName || "",
-        appName: dp?.appName || dp?.seriesName || "",
-        xLabel: dp?.xLabel || "",
-        weekCode: dp?.weekCode || "",
-        inferredStartDate: dp?.inferredStartDate || null,
-        value: typeof dp?.value === "number" ? dp.value : null,
-        unit: dp?.unit || chart?.unit || "",
-        confidence: typeof dp?.confidence === "number" ? dp.confidence : null,
-        note: dp?.note || ""
-      })),
-      insights: Array.isArray(chart?.insights) ? chart.insights : []
-    };
-  });
-  return {
-    aiEnabled: true, extractedAt: nowIso(),
-    stateSummary: {
-      pageName: stateMeta.pageName || "", stateType: stateMeta.stateType || "baseline",
-      filterName: stateMeta.filterName || "", filterValue: stateMeta.filterValue || "",
-      chartCount: safeCharts.length
-    },
-    weekMappings: weekMappings.map(m => ({
-      weekCode: m?.weekCode || "",
-      inferredStartDate: m?.inferredStartDate || null,
-      confidence: typeof m?.confidence === "number" ? m.confidence : null,
-      evidence: m?.evidence || ""
-    })),
-    charts: safeCharts, executiveSummary, limitations
-  };
-}
-
-async function analyzeStateWithAI(stateMeta, slicesWithDataUrls) {
-  if (!OPENAI_API_KEY) return buildExtractionFallback(stateMeta);
-  const content = [{
-    type: "text",
-    text:
-      `You are analyzing dashboard screenshots for structured data extraction.\n` +
-      `Result must be based ONLY on the screenshots and the supplied state metadata.\n\n` +
-      `State metadata:\n- clientName: ${stateMeta.clientName || ""}\n- pageName: ${stateMeta.pageName || ""}\n- stateType: ${stateMeta.stateType || "baseline"}\n- filterName: ${stateMeta.filterName || ""}\n- filterValue: ${stateMeta.filterValue || ""}\n\n` +
-      `Return strict JSON with charts, datapoints, weekMappings, executiveSummary, limitations.\n` +
-      `Rules: extract approximate numbers when possible, preserve week codes exactly, do not invent values, stay closed-book.`
-  }];
-  for (const s of slicesWithDataUrls) if (s?.imageDataUrl) content.push({ type: "image_url", image_url: { url: s.imageDataUrl } });
-  const raw = await callOpenAIChatJSON({
-    model: OPENAI_VISION_MODEL, temperature: 0.1,
-    messages: [
-      { role: "system", content: "You are a careful data extraction assistant. Return strict JSON only." },
-      { role: "user", content }
-    ]
-  });
-  return normalizeExtractionResult(raw, stateMeta);
-}
-
-async function saveExtraction(runId, stateId, extraction) {
-  await writeJson(getStateExtractionPath(runId, stateId), extraction);
-}
-
-function flattenExtractedRows(stateMeta, extraction) {
-  const rows = [];
-  for (const chart of (extraction?.charts || [])) {
-    for (const dp of (chart?.datapoints || [])) {
-      rows.push({
-        runId: stateMeta.runId, stateId: stateMeta.stateId,
-        pageName: stateMeta.pageName || "", stateType: stateMeta.stateType || "baseline",
-        filterName: stateMeta.filterName || "", filterValue: stateMeta.filterValue || "",
-        chartTitle: chart?.title || "", chartType: chart?.chartType || "",
-        xAxisLabel: chart?.xAxisLabel || "", yAxisLabel: chart?.yAxisLabel || "",
-        unit: dp?.unit || chart?.unit || "",
-        seriesName: dp?.seriesName || "",
-        appName: dp?.appName || dp?.seriesName || "",
-        xLabel: dp?.xLabel || "", weekCode: dp?.weekCode || "",
-        inferredStartDate: dp?.inferredStartDate || null,
-        value: typeof dp?.value === "number" ? dp.value : null,
-        confidence: typeof dp?.confidence === "number" ? dp.confidence : null,
-        note: dp?.note || "", capturedAt: stateMeta.capturedAt || ""
-      });
-    }
-  }
-  return rows;
-}
-
-function buildComparableKey(row) {
-  return [row.pageName, row.filterName, row.filterValue, row.chartTitle, row.seriesName || row.appName].join(" | ");
-}
-function sortRowsChronologically(rows) {
-  return [...rows].sort((a, b) => {
-    const ad = a.inferredStartDate || ""; const bd = b.inferredStartDate || "";
-    if (ad && bd && ad !== bd) return ad.localeCompare(bd);
-    const aw = a.weekCode || ""; const bw = b.weekCode || "";
-    if (aw !== bw) return aw.localeCompare(bw);
-    return String(a.xLabel || "").localeCompare(String(b.xLabel || ""));
-  });
-}
-
-function buildHeuristicReport(latestData) {
-  const rows = latestData?.extractedRows || [];
-  const client = latestData?.clientName || "the client";
-  const states = latestData?.states || [];
-  if (!rows.length) {
-    return [
-      `Report for ${client}:`,
-      `The latest run captured ${states.length} state(s), but no numeric chart datapoints were extracted yet.`
-    ].join("\n\n");
-  }
-  const groups = new Map();
-  for (const r of rows) {
-    const k = buildComparableKey(r);
-    if (!groups.has(k)) groups.set(k, []);
-    groups.get(k).push(r);
-  }
-  const lines = [];
-  for (const [, groupRows] of groups.entries()) {
-    const o = sortRowsChronologically(groupRows).filter(r => typeof r.value === "number");
-    if (o.length >= 2) {
-      const f = o[0]; const l = o[o.length - 1];
-      const d = +(l.value - f.value).toFixed(2);
-      lines.push(`${l.seriesName || l.appName || "Series"} in ${l.chartTitle || "chart"} moved from ${f.value}${f.unit || ""} to ${l.value}${l.unit || ""} (${d >= 0 ? "+" : ""}${d}${l.unit || ""}).`);
-    }
-  }
-  return [
-    `Report for ${client}:`,
-    `The latest run includes ${latestData.totalStates || 0} state(s), ${latestData.totalSlices || 0} slice(s), and ${rows.length} extracted datapoint(s).`,
-    lines.length ? lines.slice(0, 8).join(" ") : `Not enough comparable numeric datapoints yet.`
-  ].join("\n\n");
-}
-
-function buildAskFallback(latestData, question) {
-  const rows = latestData?.extractedRows || [];
-  const q = String(question || "").trim().toLowerCase();
-  if (!latestData) return "I do not have any captured dashboard data yet.";
-  if (q.includes("summary") || q.includes("overview"))
-    return `The latest run contains ${latestData.totalStates || 0} state(s), ${latestData.totalSlices || 0} slice(s), and ${rows.length} extracted datapoint(s).`;
-  if (q.includes("how many states")) return `${latestData.totalStates || 0} state(s).`;
-  if (q.includes("how many slices")) return `${latestData.totalSlices || 0} slice(s).`;
-  const matched = rows.filter(r => {
-    const t = [r.pageName, r.filterName, r.filterValue, r.chartTitle, r.seriesName, r.appName, r.weekCode, r.xLabel].join(" ").toLowerCase();
-    return q && (t.includes(q) || q.split(/\s+/).some(tok => tok && t.includes(tok)));
-  });
-  if (matched.length) {
-    const s = matched.slice(0, 8).map(r => {
-      const series = r.seriesName || r.appName || "series";
-      const point = r.weekCode || r.xLabel || "point";
-      const value = typeof r.value === "number" ? `${r.value}${r.unit || ""}` : "unreadable";
-      const scope = r.filterName ? `${r.pageName} / ${r.filterName}=${r.filterValue}` : `${r.pageName} baseline`;
-      return `${scope} → ${series} at ${point}: ${value}`;
-    });
-    return `Matching datapoints: ${s.join("; ")}.`;
-  }
-  return rows.length ? `Not found in extracted dataset.` : `No numeric extraction rows are available yet.`;
-}
-
-function buildCondensedDataset(latestData, limit = 350) {
-  const rows = latestData?.extractedRows || [];
-  return {
-    runId: latestData?.runId || "", clientName: latestData?.clientName || "",
-    totalStates: latestData?.totalStates || 0, totalSlices: latestData?.totalSlices || 0,
-    weekMappings: latestData?.weekMappings || [],
-    states: (latestData?.states || []).map(s => ({
-      pageName: s.pageName, stateType: s.stateType,
-      filterName: s.filterName, filterValue: s.filterValue,
-      sliceCount: s.sliceCount, capturedAt: s.capturedAt
-    })),
-    extractedRows: rows.slice(0, limit)
-  };
-}
-async function generateClientAwareReport(latestData) {
-  const rows = latestData?.extractedRows || [];
-  if (!OPENAI_API_KEY || !rows.length) return buildHeuristicReport(latestData);
-  const ds = buildCondensedDataset(latestData, 300);
-  try {
-    const text = await callOpenAIChatText({
-      model: OPENAI_TEXT_MODEL, temperature: 0.2,
-      messages: [
-        { role: "system", content: "You write concise business analysis from structured dashboard data only. Do not use external knowledge. Use numeric values whenever available. Frame the report from the named client's perspective." },
-        { role: "user", content: `Write a strategic report for client "${latestData.clientName || ""}". Use ONLY the provided dataset. Focus on trends across visible week codes. Mention numeric movement explicitly.\n\nDataset JSON:\n${JSON.stringify(ds)}` }
-      ]
-    });
-    return text || buildHeuristicReport(latestData);
-  } catch { return buildHeuristicReport(latestData); }
-}
-async function answerClosedBook(latestData, question) {
-  const rows = latestData?.extractedRows || [];
-  if (!OPENAI_API_KEY || !rows.length) return buildAskFallback(latestData, question);
-  const ds = buildCondensedDataset(latestData, 300);
-  try {
-    const text = await callOpenAIChatText({
-      model: OPENAI_TEXT_MODEL, temperature: 0.1,
-      messages: [
-        { role: "system", content: "Answer questions using ONLY the provided dashboard dataset. If the answer is not in the data, say that clearly. Be numeric when possible." },
-        { role: "user", content: `Question: ${question}\n\nDataset JSON:\n${JSON.stringify(ds)}` }
-      ]
-    });
-    return text || buildAskFallback(latestData, question);
-  } catch { return buildAskFallback(latestData, question); }
-}
-
-function buildReportHtml(latestData, reportText) {
-  const states = latestData?.states || [];
-  const rows = latestData?.extractedRows || [];
-  const stateRows = states.length
-    ? states.map(s => {
-        const label = s.stateType === "baseline" ? `${s.pageName} — Baseline` : `${s.pageName} — ${s.filterName} = ${s.filterValue}`;
-        return `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(String(s.sliceCount || 0))}</td><td>${escapeHtml(s.capturedAt || "")}</td></tr>`;
-      }).join("")
-    : `<tr><td colspan="3">No states available.</td></tr>`;
-  const dpRows = rows.length
-    ? rows.slice(0, 120).map(r => `<tr><td>${escapeHtml(r.pageName || "")}</td><td>${escapeHtml(r.filterName ? `${r.filterName} = ${r.filterValue}` : "Baseline")}</td><td>${escapeHtml(r.chartTitle || "")}</td><td>${escapeHtml(r.seriesName || r.appName || "")}</td><td>${escapeHtml(r.weekCode || r.xLabel || "")}</td><td>${escapeHtml(r.inferredStartDate || "")}</td><td>${escapeHtml(typeof r.value === "number" ? String(r.value) : "")}${escapeHtml(r.unit || "")}</td><td>${escapeHtml(typeof r.confidence === "number" ? String(r.confidence) : "")}</td></tr>`).join("")
-    : `<tr><td colspan="8">No extracted numeric datapoints yet.</td></tr>`;
-  const paragraphs = String(reportText || "").split(/\n{2,}/).filter(Boolean).map(p => `<p>${escapeHtml(p)}</p>`).join("");
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>PowerBI Guided Capture Report</title>
-<style>body{font-family:Arial,Helvetica,sans-serif;margin:24px;color:#111827}h1{margin-bottom:8px}h2{margin-top:0}.muted{color:#6b7280;margin-bottom:20px}.card{border:1px solid #d1d5db;border-radius:12px;padding:16px;margin-bottom:18px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #d1d5db;padding:10px;text-align:left;font-size:13px;vertical-align:top}th{background:#f3f4f6}.small{font-size:12px;color:#6b7280}p{line-height:1.55}</style>
-</head><body>
-<h1>PowerBI Guided Capture Report</h1>
-<div class="muted">Client: ${escapeHtml(latestData?.clientName || "Unknown")} • Run: ${escapeHtml(latestData?.runId || "")} • States: ${escapeHtml(String(latestData?.totalStates || 0))} • Slices: ${escapeHtml(String(latestData?.totalSlices || 0))} • Extracted datapoints: ${escapeHtml(String(rows.length))}</div>
-<div class="card"><h2>Strategic Summary</h2>${paragraphs || "<p>No report text available yet.</p>"}</div>
-<div class="card"><h2>Captured States</h2><table><thead><tr><th>State</th><th>Slices</th><th>Captured At</th></tr></thead><tbody>${stateRows}</tbody></table></div>
-<div class="card"><h2>Extracted Datapoints</h2><div class="small">Showing up to 120 rows.</div><table><thead><tr><th>Page</th><th>State</th><th>Chart</th><th>Series / App</th><th>Week / X</th><th>Inferred Date</th><th>Value</th><th>Confidence</th></tr></thead><tbody>${dpRows}</tbody></table></div>
-</body></html>`;
-}
-
-async function buildLatestDataForRun(runId) {
-  const runMeta = (await readJsonIfExists(getRunMetaPath(runId), null)) || { runId };
-  const statesRoot = getStatesRoot(runId);
-  const stateFolders = await fsp.readdir(statesRoot).catch(() => []);
-  const states = [];
-  const extractedRows = [];
-  const weekMappings = [];
-  for (const folder of stateFolders) {
-    const dir = path.join(statesRoot, folder);
-    const stateMeta = await readJsonIfExists(path.join(dir, "state.json"), null);
-    const extraction = await readJsonIfExists(path.join(dir, "extraction.json"), null);
-    if (!stateMeta) continue;
-    states.push({
-      stateId: stateMeta.stateId, stepId: stateMeta.stepId || "",
-      pageName: stateMeta.pageName || "", stateType: stateMeta.stateType || "baseline",
-      filterName: stateMeta.filterName || "", filterValue: stateMeta.filterValue || "",
-      capturedAt: stateMeta.capturedAt || "",
-      sliceCount: stateMeta.sliceCount || 0,
-      aiEnabled: !!extraction?.aiEnabled,
-      chartCount: Array.isArray(extraction?.charts) ? extraction.charts.length : 0,
-      executiveSummary: Array.isArray(extraction?.executiveSummary) ? extraction.executiveSummary : []
-    });
-    if (extraction) {
-      extractedRows.push(...flattenExtractedRows(stateMeta, extraction));
-      if (Array.isArray(extraction.weekMappings)) weekMappings.push(...extraction.weekMappings);
-    }
-  }
-  states.sort((a, b) => String(a.capturedAt || "").localeCompare(String(b.capturedAt || "")));
-  return {
-    runId: runMeta.runId || runId, clientName: runMeta.clientName || "",
-    dashboardUrl: runMeta.dashboardUrl || "", mode: runMeta.mode || "",
-    startedAt: runMeta.startedAt || "", finishedAt: runMeta.finishedAt || "",
-    updatedAt: nowIso(),
-    totalStates: states.length,
-    totalSlices: states.reduce((a, s) => a + (s.sliceCount || 0), 0),
-    states, extractedRows, weekMappings
-  };
-}
-
-async function refreshLatestArtifacts(runId) {
-  const latestData = await buildLatestDataForRun(runId);
-  const reportText = await generateClientAwareReport(latestData);
-  latestData.reportText = reportText;
-  await writeJson(LATEST_DATA_PATH, latestData);
-  await fsp.writeFile(LATEST_REPORT_PATH, buildReportHtml(latestData, reportText), "utf8");
-  return latestData;
-}
-
-async function safeReadText(res) { try { return await res.text(); } catch { return ""; } }
-
-async function runExtractionInBackground(runId, stateId) {
-  try {
-    setExtractionStatus(runId, stateId, { stage: "extracting", progress: 20, message: "Preparing screenshots for extraction" });
-    const stateMeta = await readJsonIfExists(getStateMetaPath(runId, stateId), null);
-    if (!stateMeta) throw new Error("State not found for extraction.");
-    const slicesWithData = await loadStateSlicesAsDataUrls(runId, stateId, stateMeta);
-    let extraction;
-    try {
-      extraction = await analyzeStateWithAI(stateMeta, slicesWithData);
-      setExtractionStatus(runId, stateId, { stage: "extracting", progress: 70, message: "Extraction returned. Saving results." });
-    } catch (err) {
-      extraction = { ...buildExtractionFallback(stateMeta), limitations: [`AI extraction failed: ${err.message}`] };
-      setExtractionStatus(runId, stateId, { stage: "extracting", progress: 70, message: `Extraction fallback: ${err.message}`, error: err.message });
-    }
-    await saveExtraction(runId, stateId, extraction);
-    setExtractionStatus(runId, stateId, { stage: "reporting", progress: 85, message: "Refreshing report and dataset" });
-    await refreshLatestArtifacts(runId);
-    setExtractionStatus(runId, stateId, { stage: "done", progress: 100, message: "Extraction complete", finishedAt: nowIso() });
-  } catch (err) {
-    setExtractionStatus(runId, stateId, { stage: "failed", progress: 100, message: `Extraction pipeline failed: ${err.message}`, error: err.message, finishedAt: nowIso() });
-  }
-}
-
-app.get("/health", async (req, res) => {
-  const latest = await readJsonIfExists(LATEST_DATA_PATH, null);
+app.get("/health", (_req, res) => {
   res.json({
-    ok: true, service: "powerbi-demo-backend", dataDir: DATA_DIR,
-    aiEnabled: !!OPENAI_API_KEY, visionModel: OPENAI_VISION_MODEL, textModel: OPENAI_TEXT_MODEL,
-    latestRunId: latest?.runId || "",
-    totalStates: latest?.totalStates || 0,
-    totalSlices: latest?.totalSlices || 0,
-    extractedRows: Array.isArray(latest?.extractedRows) ? latest.extractedRows.length : 0
+    ok: true,
+    service: "powerbi-demo-backend",
+    ai_enabled: Boolean(OPENAI_API_KEY),
+    model: OPENAI_MODEL,
+    data_dir: DATA_DIR
   });
 });
 
 app.post("/capture-state/start", async (req, res) => {
-  const meta = req.body || {};
-  if (!meta.runId || !meta.stateId) return res.status(400).json({ ok: false, error: "Missing runId or stateId." });
   try {
-    await saveRunMetaFromMeta(meta);
-    await initStateMeta(meta, Number(meta.totalSlices || 0));
-    setExtractionStatus(meta.runId, meta.stateId, { stage: "receiving", progress: 5, message: "State initialized. Awaiting slices." });
-    return res.json({ ok: true });
-  } catch (err) {
-    return res.status(500).json({ ok: false, error: err.message });
+    const { runId: incomingRunId, clientName, dashboardUrl, pageName, filterName, filterValue } = req.body || {};
+    if (!clientName) return res.status(400).json({ ok: false, error: "clientName is required" });
+    if (!pageName) return res.status(400).json({ ok: false, error: "pageName is required" });
+
+    const runId = incomingRunId || makeId("run");
+    const stateId = makeId("state");
+    const run = await getOrCreateRun(runId, {
+      clientName,
+      dashboardUrl: dashboardUrl || "",
+      createdAt: new Date().toISOString()
+    });
+
+    run.clientName = clientName || run.clientName;
+    run.dashboardUrl = dashboardUrl || run.dashboardUrl || "";
+    run.updatedAt = new Date().toISOString();
+    run.states[stateId] = {
+      stateId,
+      runId,
+      clientName: run.clientName,
+      dashboardUrl: run.dashboardUrl,
+      pageName,
+      filterName: filterName || "",
+      filterValue: filterValue || "",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      slices: [],
+      analysis: {
+        status: "uploading",
+        numeric_rows: [],
+        text_rows: [],
+        summary: "",
+        error: null,
+        startedAt: null,
+        completedAt: null,
+        slice_summaries: []
+      }
+    };
+
+    await saveRun(run);
+    res.json({ ok: true, runId, stateId });
+  } catch (error) {
+    console.error("capture-state/start error:", error);
+    res.status(500).json({ ok: false, error: error.message || "start failed" });
   }
 });
 
 app.post("/capture-state/slice", async (req, res) => {
-  const body = req.body || {};
-  if (!body.runId || !body.stateId) return res.status(400).json({ ok: false, error: "Missing runId or stateId." });
-  if (!body.sliceIndex) return res.status(400).json({ ok: false, error: "Missing sliceIndex." });
   try {
-    const stateMeta = await appendSlice(body.runId, body.stateId, body);
-    setExtractionStatus(body.runId, body.stateId, {
-      stage: "receiving", progress: 10,
-      message: `Received slice ${stateMeta.sliceCount}${stateMeta.expectedSliceCount ? ` of ${stateMeta.expectedSliceCount}` : ""}`
+    const { runId, stateId, sliceIndex, imageBase64, scrollY = 0 } = req.body || {};
+    if (!runId || !stateId || sliceIndex === undefined || !imageBase64) {
+      return res.status(400).json({ ok: false, error: "runId, stateId, sliceIndex and imageBase64 are required" });
+    }
+
+    const run = await getRun(runId);
+    if (!run) return res.status(404).json({ ok: false, error: "run not found" });
+    const state = run.states?.[stateId];
+    if (!state) return res.status(404).json({ ok: false, error: "state not found" });
+
+    const stateDir = path.join(DATA_DIR, "runs", runId, stateId);
+    await ensureDir(stateDir);
+
+    const payload = stripDataUrlPrefix(imageBase64);
+    const fileName = `slice-${String(sliceIndex).padStart(3, "0")}.png`;
+    const filePath = path.join(stateDir, fileName);
+    const imageBuffer = Buffer.from(payload, "base64");
+    await fsp.writeFile(filePath, imageBuffer);
+
+    state.slices.push({
+      sliceIndex,
+      scrollY,
+      fileName,
+      filePath,
+      createdAt: new Date().toISOString()
     });
-    return res.json({ ok: true, sliceCount: stateMeta.sliceCount });
-  } catch (err) {
-    return res.status(500).json({ ok: false, error: err.message });
+    state.updatedAt = new Date().toISOString();
+    state.analysis.status = "uploading";
+
+    await saveRun(run);
+    res.json({ ok: true, runId, stateId, sliceCount: state.slices.length });
+  } catch (error) {
+    console.error("capture-state/slice error:", error);
+    res.status(500).json({ ok: false, error: error.message || "slice failed" });
   }
 });
 
 app.post("/capture-state/finish", async (req, res) => {
-  const { runId, stateId } = req.body || {};
-  if (!runId || !stateId) return res.status(400).json({ ok: false, error: "Missing runId or stateId." });
-  setExtractionStatus(runId, stateId, { stage: "saved", progress: 15, message: "All slices received. Extraction queued." });
-  res.json({ ok: true });
+  try {
+    const { runId, stateId } = req.body || {};
+    if (!runId || !stateId) return res.status(400).json({ ok: false, error: "runId and stateId are required" });
 
-  extractionQueue = extractionQueue
-    .then(() => runExtractionInBackground(runId, stateId))
-    .catch(err => {
-      setExtractionStatus(runId, stateId, {
-        stage: "failed",
-        progress: 100,
-        message: `Background extraction crashed: ${err.message}`,
-        error: err.message,
-        finishedAt: nowIso()
-      });
+    const run = await getRun(runId);
+    if (!run) return res.status(404).json({ ok: false, error: "run not found" });
+    const state = run.states?.[stateId];
+    if (!state) return res.status(404).json({ ok: false, error: "state not found" });
+
+    state.updatedAt = new Date().toISOString();
+    state.analysis.status = "queued";
+    state.analysis.error = null;
+    await saveRun(run);
+    queueExtraction(runId, stateId);
+
+    res.json({
+      ok: true,
+      runId,
+      stateId,
+      status: "queued",
+      statusUrl: `/state-status?runId=${encodeURIComponent(runId)}&stateId=${encodeURIComponent(stateId)}`,
+      reportUrl: `/report?runId=${encodeURIComponent(runId)}&stateId=${encodeURIComponent(stateId)}`,
+      latestDataUrl: `/latest-data?runId=${encodeURIComponent(runId)}`
     });
+  } catch (error) {
+    console.error("capture-state/finish error:", error);
+    res.status(500).json({ ok: false, error: error.message || "finish failed" });
+  }
 });
 
 app.get("/state-status", async (req, res) => {
-  const runId = req.query.runId || ""; const stateId = req.query.stateId || "";
-  if (!runId || !stateId) return res.status(400).json({ ok: false, error: "Missing runId or stateId." });
-  const status = getExtractionStatus(runId, stateId);
-  if (!status) return res.status(404).json({ ok: false, error: "No status for that state." });
-  return res.json({ ok: true, status });
-});
+  try {
+    const { runId, stateId } = req.query || {};
+    if (!runId || !stateId) return res.status(400).json({ ok: false, error: "runId and stateId are required" });
 
-app.post("/finish-run", async (req, res) => {
-  const runId = req.body?.runId;
-  if (!runId) return res.json({ ok: true });
-  const p = getRunMetaPath(runId);
-  const m = await readJsonIfExists(p, null);
-  if (m) {
-    m.finishedAt = req.body?.finishedAt || nowIso();
-    m.lastUpdatedAt = nowIso();
-    await writeJson(p, m);
-    await refreshLatestArtifacts(runId);
+    const run = await getRun(runId);
+    if (!run) return res.status(404).json({ ok: false, error: "run not found" });
+    const state = run.states?.[stateId];
+    if (!state) return res.status(404).json({ ok: false, error: "state not found" });
+
+    const analysis = state.analysis || {};
+    res.json({
+      ok: true,
+      runId,
+      stateId,
+      pageName: state.pageName,
+      filterName: state.filterName,
+      filterValue: state.filterValue,
+      status: analysis.status || "not_started",
+      numericRowCount: Array.isArray(analysis.numeric_rows) ? analysis.numeric_rows.length : 0,
+      textRowCount: Array.isArray(analysis.text_rows) ? analysis.text_rows.length : 0,
+      summaryAvailable: Boolean(analysis.summary),
+      summary: analysis.summary || "",
+      error: analysis.error || null
+    });
+  } catch (error) {
+    console.error("state-status error:", error);
+    res.status(500).json({ ok: false, error: error.message || "status failed" });
   }
-  return res.json({ ok: true });
 });
 
 app.get("/latest-data", async (req, res) => {
-  const latest = await readJsonIfExists(LATEST_DATA_PATH, null);
-  if (!latest) return res.status(404).json({ ok: false, error: "No latest data found." });
-  return res.json(latest);
-});
-app.get("/latest-report", async (req, res) => {
-  if (!fs.existsSync(LATEST_REPORT_PATH)) return res.status(404).send("No report found yet.");
-  return res.sendFile(LATEST_REPORT_PATH);
-});
-app.post("/ask", async (req, res) => {
-  const latest = await readJsonIfExists(LATEST_DATA_PATH, null);
-  const q = req.body?.question || "";
-  const answer = await answerClosedBook(latest, q);
-  return res.json({ ok: true, answer });
+  try {
+    const requestedRunId = req.query?.runId;
+    const runId = requestedRunId || (await findLatestRunId());
+    if (!runId) return res.json({ ok: true, runs: [], message: "No runs found yet." });
+
+    const run = await getRun(runId);
+    if (!run) return res.status(404).json({ ok: false, error: "run not found" });
+
+    const states = Object.values(run.states || {}).map((state) => ({
+      stateId: state.stateId,
+      pageName: state.pageName,
+      filterName: state.filterName,
+      filterValue: state.filterValue,
+      sliceCount: state.slices?.length || 0,
+      analysisStatus: state.analysis?.status || "not_started",
+      numericRowCount: state.analysis?.numeric_rows?.length || 0,
+      summary: state.analysis?.summary || "",
+      reportUrl: `/report?runId=${encodeURIComponent(run.runId)}&stateId=${encodeURIComponent(state.stateId)}`
+    }));
+
+    res.json({
+      ok: true,
+      runId: run.runId,
+      clientName: run.clientName,
+      dashboardUrl: run.dashboardUrl,
+      createdAt: run.createdAt,
+      updatedAt: run.updatedAt,
+      stateCount: states.length,
+      states
+    });
+  } catch (error) {
+    console.error("latest-data error:", error);
+    res.status(500).json({ ok: false, error: error.message || "latest-data failed" });
+  }
 });
 
-ensureDirs()
-  .then(() => {
-    app.listen(PORT, "0.0.0.0", () => {
-      console.log(`PowerBI backend listening on port ${PORT}`);
-      console.log(`DATA_DIR=${DATA_DIR}`);
-      console.log(`AI enabled=${!!OPENAI_API_KEY}`);
-    });
-  })
-  .catch(err => { console.error("Failed to initialize backend:", err); process.exit(1); });
+app.get("/report", async (req, res) => {
+  try {
+    const { runId, stateId } = req.query || {};
+    if (!runId) return res.status(400).send("runId is required");
+
+    const run = await getRun(runId);
+    if (!run) return res.status(404).send("Run not found");
+
+    if (stateId) {
+      const state = run.states?.[stateId];
+      if (!state) return res.status(404).send("State not found");
+      return res.send(renderStateReport(run, state));
+    }
+
+    res.send(renderRunReport(run));
+  } catch (error) {
+    console.error("report error:", error);
+    res.status(500).send(error.message || "report failed");
+  }
+});
+
+app.post("/ask", async (req, res) => {
+  try {
+    const { runId, question } = req.body || {};
+    if (!runId || !question) return res.status(400).json({ ok: false, error: "runId and question are required" });
+
+    const run = await getRun(runId);
+    if (!run) return res.status(404).json({ ok: false, error: "run not found" });
+
+    const states = Object.values(run.states || {});
+    const allNumericRows = states.flatMap((s) => s.analysis?.numeric_rows || []);
+    const allSummaries = states.map((s) => s.analysis?.summary).filter(Boolean);
+    const anyPending = states.some((s) => ["queued", "running", "uploading"].includes(s.analysis?.status));
+    const anyFailed = states.some((s) => s.analysis?.status === "failed");
+
+    if (allNumericRows.length > 0) {
+      const answer = await answerQuestionFromDataset({ question, run, numericRows: allNumericRows, summaries: allSummaries });
+      return res.json({ ok: true, mode: "numeric_rows", answer });
+    }
+
+    if (anyPending) {
+      return res.json({ ok: false, reason: "extraction_pending", answer: "Extraction is still in progress for the latest capture. Please wait a bit and try again." });
+    }
+
+    if (allSummaries.length > 0) {
+      const answer = await answerQuestionFromSummary({ question, run, summaries: allSummaries });
+      return res.json({ ok: true, mode: "summary_fallback", warning: "No numeric rows were extracted, so this answer is based on qualitative summary text.", answer });
+    }
+
+    if (anyFailed) {
+      return res.json({ ok: false, reason: "extraction_failed", answer: "Extraction failed for one or more captures. Please review the report/status page or recapture the state." });
+    }
+
+    res.json({ ok: false, reason: "no_data", answer: "No extracted data is available yet for this run." });
+  } catch (error) {
+    console.error("ask error:", error);
+    res.status(500).json({ ok: false, error: error.message || "ask failed" });
+  }
+});
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`PowerBI backend listening on port ${PORT}`);
+});
+
+function queueExtraction(runId, stateId) {
+  extractionQueue = extractionQueue.then(() => runExtraction(runId, stateId)).catch((error) => {
+    console.error("queueExtraction error:", error);
+  });
+}
+
+async function runExtraction(runId, stateId) {
+  const run = await getRun(runId);
+  if (!run) return;
+  const state = run.states?.[stateId];
+  if (!state) return;
+
+  state.analysis.status = "running";
+  state.analysis.error = null;
+  state.analysis.startedAt = new Date().toISOString();
+  await saveRun(run);
+
+  try {
+    const slices = (state.slices || []).slice(0, MAX_AI_SLICES);
+    const numericRows = [];
+    const textRows = [];
+    const sliceSummaries = [];
+
+    for (const slice of slices) {
+      const imageBuffer = await fsp.readFile(slice.filePath);
+      const dataUrl = `data:image/png;base64,${imageBuffer.toString("base64")}`;
+      const extracted = await analyzeSliceWithAI({
+        dataUrl,
+        pageName: state.pageName,
+        filterName: state.filterName,
+        filterValue: state.filterValue,
+        sliceIndex: slice.sliceIndex
+      });
+
+      numericRows.push(...sanitizeNumericRows(extracted.numeric_rows || [], slice.sliceIndex));
+      textRows.push(...sanitizeTextRows(extracted.text_rows || [], slice.sliceIndex));
+      if (extracted.summary) sliceSummaries.push({ sliceIndex: slice.sliceIndex, summary: extracted.summary });
+    }
+
+    const dedupedNumeric = dedupeNumericRows(numericRows);
+    state.analysis.numeric_rows = dedupedNumeric;
+    state.analysis.text_rows = textRows;
+    state.analysis.slice_summaries = sliceSummaries;
+    state.analysis.summary = buildSummaryFromExtraction({ state, numericRows: dedupedNumeric, textRows, sliceSummaries });
+    state.analysis.status = "completed";
+    state.analysis.error = null;
+    state.analysis.completedAt = new Date().toISOString();
+    state.updatedAt = new Date().toISOString();
+    await saveRun(run);
+  } catch (error) {
+    console.error("runExtraction error:", error);
+    state.analysis.status = "failed";
+    state.analysis.error = error.message || "Extraction failed";
+    state.analysis.completedAt = new Date().toISOString();
+    state.updatedAt = new Date().toISOString();
+    await saveRun(run);
+  }
+}
+
+async function analyzeSliceWithAI({ dataUrl, pageName, filterName, filterValue, sliceIndex }) {
+  if (!OPENAI_API_KEY) {
+    return { summary: "AI extraction is disabled because OPENAI_API_KEY is not configured.", numeric_rows: [], text_rows: [] };
+  }
+
+  const prompt = [
+    "You are extracting structured information from a Power BI dashboard screenshot.",
+    `Page: ${pageName}`,
+    `Filter: ${filterName || "None"} = ${filterValue || "None"}`,
+    `Slice index: ${sliceIndex}`,
+    "",
+    "Return ONLY valid JSON with this exact shape:",
+    '{"summary":"...","numeric_rows":[{"metric_name":"","value":"","unit":"","context":"","slice_index":0}],"text_rows":[{"label":"","text":"","context":"","slice_index":0}]}',
+    "",
+    "Rules:",
+    "- Do not invent values.",
+    "- Extract visible KPI cards, percentages, counts, trend values, table values, chart labels with numeric values, and clearly readable numbers.",
+    "- Use strings for value exactly as visible.",
+    "- If no numeric data is readable, return empty numeric_rows but still provide a concise summary."
+  ].join("\n");
+
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      temperature: 0,
+      messages: [
+        { role: "system", content: "You are a precise extraction engine. Return only strict JSON." },
+        { role: "user", content: [{ type: "text", text: prompt }, { type: "image_url", image_url: { url: dataUrl, detail: "low" } }] }
+      ]
+    })
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`OpenAI API error: ${response.status} ${text}`);
+  }
+
+  const json = await response.json();
+  const content = json?.choices?.[0]?.message?.content || "";
+  const parsed = parseJsonObject(content);
+  return {
+    summary: parsed.summary || "",
+    numeric_rows: Array.isArray(parsed.numeric_rows) ? parsed.numeric_rows : [],
+    text_rows: Array.isArray(parsed.text_rows) ? parsed.text_rows : []
+  };
+}
+
+async function answerQuestionFromDataset({ question, run, numericRows, summaries }) {
+  if (!OPENAI_API_KEY) return fallbackAnswerFromRows(question, numericRows, summaries);
+
+  const prompt = [
+    "Answer the user's question using ONLY the provided extracted dataset.",
+    "If the answer is not supported by the dataset, say that it is not available from the extracted data.",
+    "Be concise and grounded.",
+    "",
+    `Question: ${question}`,
+    "",
+    "Dataset:",
+    JSON.stringify({ runId: run.runId, clientName: run.clientName, numeric_rows: numericRows.slice(0, 250), summaries: summaries.slice(0, 20) })
+  ].join("\n");
+
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      temperature: 0,
+      messages: [
+        { role: "system", content: "You answer only from structured extracted dashboard data." },
+        { role: "user", content: prompt }
+      ]
+    })
+  });
+
+  if (!response.ok) return fallbackAnswerFromRows(question, numericRows, summaries);
+  const json = await response.json();
+  return json?.choices?.[0]?.message?.content?.trim() || fallbackAnswerFromRows(question, numericRows, summaries);
+}
+
+async function answerQuestionFromSummary({ question, run, summaries }) {
+  if (!OPENAI_API_KEY) {
+    return `A qualitative summary exists for run ${run.runId}, but no numeric rows were extracted. Please open the report page for details.`;
+  }
+
+  const prompt = [
+    "Answer the user's question using ONLY these qualitative extraction summaries from a Power BI capture.",
+    "If the answer is not directly supported, say so.",
+    "",
+    `Question: ${question}`,
+    "",
+    "Summaries:",
+    summaries.join("\n")
+  ].join("\n");
+
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      temperature: 0,
+      messages: [
+        { role: "system", content: "You answer only from supplied summary text." },
+        { role: "user", content: prompt }
+      ]
+    })
+  });
+
+  if (!response.ok) {
+    return `A qualitative summary exists for run ${run.runId}, but no numeric rows were extracted. Please open the report page for details.`;
+  }
+
+  const json = await response.json();
+  return json?.choices?.[0]?.message?.content?.trim() || `A qualitative summary exists for run ${run.runId}, but no numeric rows were extracted.`;
+}
+
+function fallbackAnswerFromRows(question, numericRows, summaries) {
+  const q = String(question || "").toLowerCase();
+  if (q.includes("how many")) return `There are ${numericRows.length} extracted numeric row(s) in the current run.`;
+  if (numericRows.length > 0) {
+    const first = numericRows[0];
+    return `The dataset contains extracted numeric rows. One example is \"${first.metric_name}\" with value \"${first.value}\".`;
+  }
+  if (summaries.length > 0) return "No numeric rows were available, but qualitative summaries exist for this run.";
+  return "No extracted data is currently available.";
+}
+
+function renderRunReport(run) {
+  const states = Object.values(run.states || {});
+  const rows = states.map((state) => {
+    const reportUrl = `/report?runId=${encodeURIComponent(run.runId)}&stateId=${encodeURIComponent(state.stateId)}`;
+    return `<tr><td>${escapeHtml(state.pageName || "")}</td><td>${escapeHtml(state.filterName || "")}</td><td>${escapeHtml(state.filterValue || "")}</td><td>${escapeHtml(String(state.slices?.length || 0))}</td><td>${escapeHtml(state.analysis?.status || "not_started")}</td><td>${escapeHtml(String(state.analysis?.numeric_rows?.length || 0))}</td><td><a href="${reportUrl}" target="_blank">Open report</a></td></tr>`;
+  }).join("");
+
+  return `
+    <html><head><title>Run Report</title>
+    <style>
+      body { font-family: Arial, sans-serif; padding: 24px; color: #111827; }
+      .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; margin: 12px 0; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { border: 1px solid #e5e7eb; padding: 8px; text-align: left; }
+      th { background: #f9fafb; }
+    </style></head>
+    <body>
+      <h1>Run Report</h1>
+      <div class="card">
+        <div><strong>Run ID:</strong> ${escapeHtml(run.runId)}</div>
+        <div><strong>Client:</strong> ${escapeHtml(run.clientName || "")}</div>
+        <div><strong>Dashboard URL:</strong> ${escapeHtml(run.dashboardUrl || "")}</div>
+        <div><strong>State count:</strong> ${states.length}</div>
+      </div>
+      <div class="card">
+        <table>
+          <thead><tr><th>Page</th><th>Filter</th><th>Value</th><th>Slices</th><th>Status</th><th>Numeric Rows</th><th>Report</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="7">No states captured yet.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </body></html>
+  `;
+}
+
+function renderStateReport(run, state) {
+  const analysis = state.analysis || {};
+  const numericRows = analysis.numeric_rows || [];
+  const rows = numericRows.length
+    ? numericRows.map((row) => `<tr><td>${escapeHtml(row.metric_name || "")}</td><td>${escapeHtml(row.value || "")}</td><td>${escapeHtml(row.unit || "")}</td><td>${escapeHtml(row.context || "")}</td><td>${escapeHtml(String(row.slice_index ?? ""))}</td></tr>`).join("")
+    : '<tr><td colspan="5">No numeric rows extracted yet.</td></tr>';
+
+  return `
+    <html><head><title>State Report</title>
+    <style>
+      body { font-family: Arial, sans-serif; padding: 24px; color: #111827; }
+      .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; margin: 12px 0; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { border: 1px solid #e5e7eb; padding: 8px; text-align: left; }
+      th { background: #f9fafb; }
+      pre { white-space: pre-wrap; }
+    </style></head>
+    <body>
+      <h1>${escapeHtml(state.pageName || "")}</h1>
+      <div class="card">
+        <div><strong>Run ID:</strong> ${escapeHtml(run.runId)}</div>
+        <div><strong>State ID:</strong> ${escapeHtml(state.stateId)}</div>
+        <div><strong>Filter:</strong> ${escapeHtml(state.filterName || "")} = ${escapeHtml(state.filterValue || "")}</div>
+        <div><strong>Status:</strong> ${escapeHtml(analysis.status || "not_started")}</div>
+        <div><strong>Slices:</strong> ${escapeHtml(String(state.slices?.length || 0))}</div>
+        <div><strong>Numeric rows:</strong> ${escapeHtml(String(numericRows.length))}</div>
+      </div>
+      <div class="card"><h2>Summary</h2><pre>${escapeHtml(analysis.summary || "No summary available yet.")}</pre></div>
+      <div class="card"><h2>Numeric Extraction Rows</h2>
+        <table>
+          <thead><tr><th>Metric</th><th>Value</th><th>Unit</th><th>Context</th><th>Slice</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <div class="card"><a href="/report?runId=${encodeURIComponent(run.runId)}" target="_blank">Open full run report</a></div>
+    </body></html>
+  `;
+}
+
+function ensureDirSync(dirPath) { fs.mkdirSync(dirPath, { recursive: true }); }
+async function ensureDir(dirPath) { await fsp.mkdir(dirPath, { recursive: true }); }
+function makeId(prefix) { return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`; }
+function getRunFilePath(runId) { return path.join(DATA_DIR, "runs", runId, "run.json"); }
+
+async function getOrCreateRun(runId, seed = {}) {
+  const existing = await getRun(runId);
+  if (existing) return existing;
+  const run = { runId, clientName: seed.clientName || "", dashboardUrl: seed.dashboardUrl || "", createdAt: seed.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString(), states: {} };
+  await saveRun(run);
+  return run;
+}
+
+async function getRun(runId) {
+  if (runCache.has(runId)) return runCache.get(runId);
+  const filePath = getRunFilePath(runId);
+  try {
+    const raw = await fsp.readFile(filePath, "utf8");
+    const parsed = JSON.parse(raw);
+    runCache.set(runId, parsed);
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function saveRun(run) {
+  const runDir = path.join(DATA_DIR, "runs", run.runId);
+  await ensureDir(runDir);
+  run.updatedAt = new Date().toISOString();
+  const filePath = getRunFilePath(run.runId);
+  await fsp.writeFile(filePath, JSON.stringify(run, null, 2), "utf8");
+  runCache.set(run.runId, run);
+}
+
+async function findLatestRunId() {
+  try {
+    const entries = await fsp.readdir(path.join(DATA_DIR, "runs"), { withFileTypes: true });
+    let latest = null;
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const filePath = getRunFilePath(entry.name);
+      try {
+        const stat = await fsp.stat(filePath);
+        if (!latest || stat.mtimeMs > latest.mtimeMs) latest = { runId: entry.name, mtimeMs: stat.mtimeMs };
+      } catch {}
+    }
+    return latest?.runId || null;
+  } catch {
+    return null;
+  }
+}
+
+function stripDataUrlPrefix(input) {
+  if (!input) return "";
+  const idx = input.indexOf("base64,");
+  return idx >= 0 ? input.slice(idx + 7) : input;
+}
+
+function parseJsonObject(text) {
+  if (!text || typeof text !== "string") return {};
+  try { return JSON.parse(text); } catch {
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start >= 0 && end > start) return JSON.parse(text.slice(start, end + 1));
+    throw new Error("Could not parse JSON from AI response");
+  }
+}
+
+function sanitizeNumericRows(rows, sliceIndex) {
+  return rows.map((row) => ({
+    metric_name: String(row.metric_name || "").trim(),
+    value: String(row.value || "").trim(),
+    unit: String(row.unit || "").trim(),
+    context: String(row.context || "").trim(),
+    slice_index: row.slice_index ?? sliceIndex,
+    numeric_value: parseNumericValue(String(row.value || ""))
+  })).filter((row) => row.metric_name || row.value);
+}
+
+function sanitizeTextRows(rows, sliceIndex) {
+  return rows.map((row) => ({
+    label: String(row.label || "").trim(),
+    text: String(row.text || "").trim(),
+    context: String(row.context || "").trim(),
+    slice_index: row.slice_index ?? sliceIndex
+  })).filter((row) => row.label || row.text);
+}
+
+function parseNumericValue(value) {
+  if (!value) return null;
+  const match = value.replace(/,/g, "").match(/-?\d+(\.\d+)?/);
+  return match ? Number(match[0]) : null;
+}
+
+function dedupeNumericRows(rows) {
+  const seen = new Set();
+  const result = [];
+  for (const row of rows) {
+    const key = [row.metric_name, row.value, row.unit, row.context, row.slice_index].join("||");
+    if (!seen.has(key)) { seen.add(key); result.push(row); }
+  }
+  return result;
+}
+
+function buildSummaryFromExtraction({ state, numericRows, textRows, sliceSummaries }) {
+  if (numericRows.length > 0) {
+    const preview = numericRows.slice(0, 6).map((r) => `${r.metric_name || "Metric"}: ${r.value}${r.unit ? ` ${r.unit}` : ""}`).join("; ");
+    return `Extraction completed for ${state.pageName}${state.filterName ? ` (${state.filterName}: ${state.filterValue})` : ""}. Found ${numericRows.length} numeric row(s).${preview ? ` Key values include ${preview}.` : ""}`;
+  }
+  if (sliceSummaries.length > 0) return sliceSummaries.map((s) => s.summary).join(" ");
+  if (textRows.length > 0) return `Extraction completed for ${state.pageName} (${state.filterName}: ${state.filterValue}) with text observations available but no numeric rows parsed.`;
+  return `Extraction completed for ${state.pageName} (${state.filterName}: ${state.filterValue}) but no readable numeric data was found.`;
+}
+
+function escapeHtml(input) {
+  return String(input || "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
+}

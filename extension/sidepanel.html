@@ -1,279 +1,132 @@
 <!DOCTYPE html>
-<html>
-  <head>
-    <meta charset="UTF-8" />
-    <title>PowerBI Demo Assistant</title>
-    <style>
-      :root {
-        --bg: #0f172a;
-        --panel: #111827;
-        --panel2: #1f2937;
-        --line: #334155;
-        --text: #e5e7eb;
-        --muted: #94a3b8;
-        --accent: #22c55e;
-        --blue: #38bdf8;
-        --warn: #f59e0b;
-        --danger: #ef4444;
-      }
-      * { box-sizing: border-box; }
-      body {
-        margin: 0;
-        background: var(--bg);
-        color: var(--text);
-        font-family: Arial, Helvetica, sans-serif;
-      }
-      .wrap { padding: 12px; }
-      .title { font-size: 18px; font-weight: 700; margin-bottom: 6px; }
-      .subtitle { font-size: 12px; color: var(--muted); line-height: 1.4; margin-bottom: 12px; }
-      .tabs { display: flex; gap: 8px; margin-bottom: 12px; }
-      .tab-btn {
-        flex: 1; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
-        background: var(--panel); color: var(--text); cursor: pointer; font-weight: 600;
-      }
-      .tab-btn.active { background: var(--blue); color: #082032; border-color: var(--blue); }
-      .panel { display: none; }
-      .panel.active { display: block; }
-      .card {
-        background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
-        padding: 12px; margin-bottom: 12px;
-      }
-      .card h3 { margin: 0 0 10px 0; font-size: 14px; }
-      .field { display: grid; gap: 6px; margin-bottom: 10px; }
-      .field label { font-size: 12px; color: var(--muted); }
-      input, select, textarea {
-        width: 100%; padding: 10px 12px; border-radius: 10px;
-        border: 1px solid var(--line); background: var(--panel2); color: var(--text);
-        font-size: 13px;
-      }
-      textarea { min-height: 90px; resize: vertical; }
-      .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-      .btn {
-        padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
-        background: var(--panel2); color: var(--text); cursor: pointer; font-weight: 600;
-      }
-      .btn:hover { filter: brightness(1.06); }
-      .btn-primary { background: var(--accent); border-color: var(--accent); color: #052e16; }
-      .btn-blue { background: var(--blue); border-color: var(--blue); color: #082032; }
-      .btn-warn { background: var(--warn); border-color: var(--warn); color: #3f2600; }
-      .btn-danger { background: var(--danger); border-color: var(--danger); color: white; }
-      .badge {
-        display: inline-block; padding: 6px 10px; border-radius: 999px; background: #0b1220;
-        border: 1px solid var(--line); font-size: 12px; margin-bottom: 8px;
-      }
-      .muted { font-size: 12px; color: var(--muted); line-height: 1.45; }
-      .check-grid { display: grid; gap: 8px; }
-      .check-item {
-        display: flex; align-items: center; gap: 8px; background: #0b1220;
-        border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; font-size: 13px;
-      }
-      .check-item input { width: auto; margin: 0; }
-      .step-box {
-        background: #0b1220; border: 1px dashed var(--line); border-radius: 12px; padding: 12px;
-      }
-      .step-title { font-size: 14px; font-weight: 700; margin-bottom: 8px; }
-      .step-line { font-size: 13px; line-height: 1.5; margin-bottom: 4px; }
-      .step-big { font-size: 15px; font-weight: 700; color: white; }
-      .status-log { display: grid; gap: 8px; max-height: 240px; overflow: auto; }
-      .log-item {
-        background: #0b1220; border: 1px solid var(--line); border-left: 4px solid var(--blue);
-        border-radius: 10px; padding: 8px 10px; font-size: 12px; line-height: 1.45;
-      }
-      .log-item.ok { border-left-color: var(--accent); }
-      .log-item.warn { border-left-color: var(--warn); }
-      .log-item.error { border-left-color: var(--danger); }
-      .log-time { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
-      .chat-history { display: grid; gap: 10px; max-height: 320px; overflow: auto; margin-bottom: 10px; }
-      .msg { border-radius: 12px; padding: 10px 12px; font-size: 13px; line-height: 1.45; white-space: pre-wrap; }
-      .msg.user { background: #10243f; border: 1px solid #1d4ed8; }
-      .msg.assistant { background: #0b1220; border: 1px solid var(--line); }
-      .msg-label { font-size: 11px; color: var(--muted); margin-bottom: 6px; text-transform: uppercase; }
-      .divider { height: 1px; background: var(--line); margin: 12px 0; }
-      .small { font-size: 11px; color: var(--muted); }
-      .reset-note {
-        background: #3f2600; border: 1px solid var(--warn); border-radius: 10px;
-        padding: 8px 10px; font-size: 12px; color: #fde68a; margin-top: 8px;
-      }
-      .progress-card { display: none; }
-      .progress-card.active { display: block; }
-      .progress-row { margin-bottom: 10px; }
-      .progress-label { font-size: 12px; color: var(--muted); margin-bottom: 4px; display: flex; justify-content: space-between; }
-      .progress-track {
-        width: 100%; height: 10px; background: #0b1220;
-        border: 1px solid var(--line); border-radius: 999px; overflow: hidden;
-      }
-      .progress-fill { height: 100%; background: var(--blue); width: 0%; transition: width 0.3s ease; }
-      .progress-fill.done { background: var(--accent); }
-      .progress-fill.failed { background: var(--danger); }
-      .reset-lock-btn { margin-top: 6px; }
-    </style>
-  </head>
-  <body>
-    <div class="wrap">
-      <div class="title">PowerBI Demo Assistant</div>
-      <div class="subtitle">
-        Guided Capture mode: the extension tells you the next tab / filter / option. You set it manually in Power BI, then click <strong>Done, Capture Now</strong>.
-      </div>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PowerBI Demo Assistant</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --text: #0f172a;
+      --muted: #64748b;
+      --border: #e2e8f0;
+      --primary: #2563eb;
+      --primary-dark: #1d4ed8;
+      --warn: #d97706;
+      --danger: #dc2626;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Arial, sans-serif; background: var(--bg); color: var(--text); }
+    .wrap { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 12px; }
+    h1 { margin: 0 0 8px; font-size: 18px; }
+    h2 { margin: 0 0 8px; font-size: 14px; }
+    .muted { color: var(--muted); font-size: 12px; }
+    label { display: block; margin-bottom: 6px; font-size: 12px; font-weight: 700; }
+    input, textarea { width: 100%; padding: 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px; background: #fff; }
+    textarea { min-height: 72px; resize: vertical; }
+    .grid { display: grid; grid-template-columns: 1fr; gap: 10px; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+    button, .btn-link { border: none; border-radius: 8px; padding: 10px 12px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; }
+    .primary { background: var(--primary); color: #fff; }
+    .primary:hover { background: var(--primary-dark); }
+    .secondary { background: #e2e8f0; color: #0f172a; }
+    .warning { background: #fef3c7; color: #92400e; }
+    .danger { background: #fee2e2; color: #991b1b; }
+    .outline { background: transparent; color: var(--primary); border: 1px solid var(--primary); }
+    .hidden { display: none !important; }
+    .kv { display: grid; grid-template-columns: 110px 1fr; gap: 6px; font-size: 12px; margin-bottom: 4px; }
+    .progress { width: 100%; height: 10px; border-radius: 999px; background: #e5e7eb; overflow: hidden; margin-top: 6px; }
+    .progress-bar { height: 100%; width: 0%; background: var(--primary); transition: width 0.3s ease; }
+    #chatAnswer { white-space: pre-wrap; word-break: break-word; font-size: 13px; line-height: 1.5; }
+    .link-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>PowerBI Demo Assistant</h1>
+      <div class="muted">Guided capture, backend extraction, report links, and grounded Q&amp;A.</div>
+    </div>
 
-      <div class="tabs">
-        <button class="tab-btn active" data-panel="capturePanel">Capture</button>
-        <button class="tab-btn" data-panel="chatPanel">Chat</button>
-      </div>
-
-      <div id="capturePanel" class="panel active">
-        <div class="card">
-          <h3>Settings</h3>
-          <div class="field">
-            <label for="clientName">Client name</label>
-            <input id="clientName" type="text" placeholder="Amazon" />
-          </div>
-          <div class="field">
-            <label for="dashboardUrl">Dashboard URL</label>
-            <input id="dashboardUrl" type="text" placeholder="https://app.powerbi.com/..." />
-          </div>
-          <div class="field">
-            <label for="backendUrl">Backend URL</label>
-            <input id="backendUrl" type="text" placeholder="https://your-render-service.onrender.com" />
-          </div>
-          <button id="saveSettingsBtn" class="btn btn-primary">Save Settings</button>
+    <div class="card">
+      <h2>Configuration</h2>
+      <div class="grid">
+        <div>
+          <label for="clientName">Client name</label>
+          <input id="clientName" type="text" placeholder="Amazon" />
         </div>
-
-        <div class="card">
-          <h3>Guided Capture Setup</h3>
-
-          <div class="field">
-            <label>Tabs to include</label>
-            <div id="tabSelection" class="check-grid"></div>
-          </div>
-
-          <div class="field">
-            <label>Filters to include</label>
-            <div id="filterSelection" class="check-grid"></div>
-          </div>
-
-          <div class="field">
-            <label>Baseline</label>
-            <div class="check-item">
-              <input id="includeBaseline" type="checkbox" checked />
-              <span>Include baseline capture for each selected tab</span>
-            </div>
-          </div>
-
-          <div class="row">
-            <button id="startGuidedRunBtn" class="btn btn-blue">Start Guided Run</button>
-            <button id="finishRunBtn" class="btn btn-danger">Finish Active Run</button>
-          </div>
-
-          <div class="row" style="margin-top:8px;">
-            <button id="loadLatestRunBtn" class="btn">Load Latest Saved Run</button>
-            <button id="openLatestReportBtn" class="btn">Open Latest Saved Report</button>
-          </div>
+        <div>
+          <label for="backendUrl">Backend URL</label>
+          <input id="backendUrl" type="text" placeholder="https://powerbi-demo-backend.onrender.com" />
         </div>
-
-        <div class="card">
-          <h3>Current Guided Step</h3>
-          <div id="runBadge" class="badge">No active guided run</div>
-
-          <div id="currentStepBox" class="step-box">
-            <div class="step-title">Waiting to start</div>
-            <div class="step-line">Start a guided run to generate the capture queue.</div>
-          </div>
-
-          <div class="row" style="margin-top:10px;">
-            <button id="doneCaptureBtn" class="btn btn-primary">Done, Capture Now</button>
-            <button id="skipStepBtn" class="btn btn-warn">Skip Step</button>
-          </div>
-
-          <div class="row" style="margin-top:8px;">
-            <button id="retryStepBtn" class="btn">Retry Current Step</button>
-            <button id="pauseRunBtn" class="btn">Pause Run</button>
-          </div>
-
-          <div class="muted" style="margin-top:10px;">
-            The extension does not click Power BI. It only guides the state and captures after you confirm the screen is ready.
-          </div>
-        </div>
-
-        <div id="progressCard" class="card progress-card">
-          <h3>Live Capture Progress</h3>
-          <div class="progress-row">
-            <div class="progress-label"><span>Screenshot capture</span><span id="captureProgressLabel">0%</span></div>
-            <div class="progress-track"><div id="captureProgressBar" class="progress-fill"></div></div>
-          </div>
-          <div class="progress-row">
-            <div class="progress-label"><span>Upload to backend</span><span id="uploadProgressLabel">0%</span></div>
-            <div class="progress-track"><div id="uploadProgressBar" class="progress-fill"></div></div>
-          </div>
-          <div class="progress-row">
-            <div class="progress-label"><span>AI extraction on backend</span><span id="extractionProgressLabel">0%</span></div>
-            <div class="progress-track"><div id="extractionProgressBar" class="progress-fill"></div></div>
-          </div>
-          <div id="progressMessage" class="muted"></div>
-          <button id="resetLockBtn" class="btn btn-warn reset-lock-btn">Reset Capture Lock</button>
-        </div>
-
-        <div class="card">
-          <h3>Manual Capture Fallback</h3>
-
-          <div class="field">
-            <label for="manualPage">Tab / page</label>
-            <select id="manualPage"></select>
-          </div>
-
-          <div class="row">
-            <div class="field">
-              <label for="manualStateType">State type</label>
-              <select id="manualStateType">
-                <option value="baseline">Baseline</option>
-                <option value="filtered">Filtered</option>
-              </select>
-            </div>
-
-            <div class="field">
-              <label for="manualFilterName">Filter name</label>
-              <select id="manualFilterName"></select>
-            </div>
-          </div>
-
-          <div class="field">
-            <label for="manualFilterValue">Filter value</label>
-            <select id="manualFilterValue"></select>
-          </div>
-
-          <button id="manualCaptureBtn" class="btn btn-blue">Capture Current Visible State</button>
-          <div class="small" style="margin-top:8px;">
-            Use this only for one-off states outside the guided queue.
-          </div>
-        </div>
-
-        <div class="card">
-          <h3>Status</h3>
-          <div id="statusLog" class="status-log"></div>
+        <div>
+          <label for="dashboardUrl">Dashboard URL</label>
+          <input id="dashboardUrl" type="text" placeholder="https://app.powerbi.com/..." />
         </div>
       </div>
-
-      <div id="chatPanel" class="panel">
-        <div class="card">
-          <h3>Data-Only Chat</h3>
-          <div class="muted" style="margin-bottom:10px;">
-            Chat answers from captured dashboard data only.
-          </div>
-
-          <div id="chatHistory" class="chat-history"></div>
-
-          <div class="field">
-            <label for="chatInput">Question</label>
-            <textarea id="chatInput" placeholder="Ask about the captured dashboard data..."></textarea>
-          </div>
-
-          <div class="row">
-            <button id="sendChatBtn" class="btn btn-primary">Send</button>
-            <button id="clearChatBtn" class="btn">Clear Chat</button>
-          </div>
-        </div>
+      <div class="row" style="margin-top:10px;">
+        <button id="startRunBtn" class="primary">Start guided run</button>
+        <button id="refreshBtn" class="secondary">Refresh state</button>
+        <button id="finishRunBtn" class="warning">Mark run complete</button>
+        <button id="resetBtn" class="danger">Reset local session</button>
       </div>
     </div>
 
-    <script src="sidepanel.js"></script>
-  </body>
+    <div class="card">
+      <h2>Guided queue</h2>
+      <div class="kv"><strong>Run ID</strong><span id="runIdText">--</span></div>
+      <div class="kv"><strong>Progress</strong><span id="progressText">0 / 0</span></div>
+      <div class="kv"><strong>Current step</strong><span id="currentStepText">--</span></div>
+      <div class="kv"><strong>Next step</strong><span id="nextStepText">--</span></div>
+      <div class="kv"><strong>Status</strong><span id="runStatusText">Idle</span></div>
+      <div class="row" style="margin-top:10px;">
+        <button id="captureBtn" class="primary">Done, capture now</button>
+        <button id="skipBtn" class="secondary">Skip step</button>
+      </div>
+      <div class="muted" style="margin-top:10px;">Set the correct Power BI tab and filter first, then click <strong>Done, capture now</strong>.</div>
+    </div>
+
+    <div id="progressCard" class="card hidden">
+      <h2>Capture progress</h2>
+      <div class="kv"><strong>Screenshot</strong><span id="screenshotStatus">Waiting</span></div>
+      <div class="progress"><div id="screenshotBar" class="progress-bar"></div></div>
+      <div class="kv" style="margin-top:10px;"><strong>Upload</strong><span id="uploadStatus">Waiting</span></div>
+      <div class="progress"><div id="uploadBar" class="progress-bar"></div></div>
+      <div class="kv" style="margin-top:10px;"><strong>Extraction</strong><span id="extractionStatus">Waiting</span></div>
+      <div class="progress"><div id="extractionBar" class="progress-bar"></div></div>
+      <div id="progressMessage" class="muted" style="margin-top:8px;">Waiting for next action.</div>
+    </div>
+
+    <div id="postCaptureCard" class="card hidden">
+      <h2>Capture result</h2>
+      <div class="kv"><strong>Upload</strong><span id="uploadStatusLine">--</span></div>
+      <div class="kv"><strong>Extraction</strong><span id="extractionStatusLine">--</span></div>
+      <div class="kv"><strong>Summary</strong><span id="summaryAvailabilityLine">--</span></div>
+      <div class="kv"><strong>Next step</strong><span id="postNextStepLine">--</span></div>
+      <div class="link-row">
+        <a id="viewReportBtn" class="btn-link outline hidden" href="#" target="_blank">View summary report</a>
+        <a id="viewLatestBtn" class="btn-link outline hidden" href="#" target="_blank">Open latest data</a>
+      </div>
+      <div id="resultMessage" class="muted" style="margin-top:8px;"></div>
+    </div>
+
+    <div class="card">
+      <h2>Run chat</h2>
+      <div class="grid">
+        <div>
+          <label for="chatQuestion">Question</label>
+          <textarea id="chatQuestion" placeholder="Example: What are the key metrics extracted from the latest run?"></textarea>
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <button id="askBtn" class="primary">Ask</button>
+      </div>
+      <div id="chatMeta" class="muted" style="margin-top:10px;">No answer yet.</div>
+      <div id="chatAnswer" style="margin-top:8px;"></div>
+    </div>
+  </div>
+  <script src="sidepanel.js"></script>
+</body>
 </html>

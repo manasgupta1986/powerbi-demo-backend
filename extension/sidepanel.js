@@ -1,675 +1,330 @@
-const PAGE_OPTIONS = [
-  "Traffic Engagement",
-  "Purchase Matrix",
-  "Purchase Funnel"
-];
-
-const FILTER_CONFIG = [
-  { filterName: "Zone", allLabel: "Select All", options: ["East", "North", "South", "West"] },
-  { filterName: "NCCS", allLabel: "Select All", options: ["A", "B"] },
-  { filterName: "Tier", allLabel: "Select All", options: ["Tier 1", "Tier 2", "Tier 3 & lower"] },
-  { filterName: "Gender", allLabel: "Select All", options: ["Male", "Female"] },
-  { filterName: "Age Band", allLabel: "Select All", options: ["Below 18", "18-24", "25-35", "35-44", "45-54", "55+"] }
-];
-
-const FILTER_MAP = Object.fromEntries(FILTER_CONFIG.map(x => [x.filterName, x]));
-
-const STORAGE_KEYS = {
-  settings: "pb_guided_settings_v1",
-  activeRun: "pb_guided_active_run_v1",
-  statusLog: "pb_guided_status_log_v1",
-  chatHistory: "pb_guided_chat_history_v1",
-  manualDraft: "pb_guided_manual_draft_v1",
-  progress: "pb_guided_progress_v1"
+const els = {
+  clientName: document.getElementById("clientName"),
+  backendUrl: document.getElementById("backendUrl"),
+  dashboardUrl: document.getElementById("dashboardUrl"),
+  startRunBtn: document.getElementById("startRunBtn"),
+  refreshBtn: document.getElementById("refreshBtn"),
+  finishRunBtn: document.getElementById("finishRunBtn"),
+  resetBtn: document.getElementById("resetBtn"),
+  runIdText: document.getElementById("runIdText"),
+  progressText: document.getElementById("progressText"),
+  currentStepText: document.getElementById("currentStepText"),
+  nextStepText: document.getElementById("nextStepText"),
+  runStatusText: document.getElementById("runStatusText"),
+  captureBtn: document.getElementById("captureBtn"),
+  skipBtn: document.getElementById("skipBtn"),
+  progressCard: document.getElementById("progressCard"),
+  screenshotStatus: document.getElementById("screenshotStatus"),
+  uploadStatus: document.getElementById("uploadStatus"),
+  extractionStatus: document.getElementById("extractionStatus"),
+  screenshotBar: document.getElementById("screenshotBar"),
+  uploadBar: document.getElementById("uploadBar"),
+  extractionBar: document.getElementById("extractionBar"),
+  progressMessage: document.getElementById("progressMessage"),
+  postCaptureCard: document.getElementById("postCaptureCard"),
+  uploadStatusLine: document.getElementById("uploadStatusLine"),
+  extractionStatusLine: document.getElementById("extractionStatusLine"),
+  summaryAvailabilityLine: document.getElementById("summaryAvailabilityLine"),
+  postNextStepLine: document.getElementById("postNextStepLine"),
+  viewReportBtn: document.getElementById("viewReportBtn"),
+  viewLatestBtn: document.getElementById("viewLatestBtn"),
+  resultMessage: document.getElementById("resultMessage"),
+  chatQuestion: document.getElementById("chatQuestion"),
+  askBtn: document.getElementById("askBtn"),
+  chatMeta: document.getElementById("chatMeta"),
+  chatAnswer: document.getElementById("chatAnswer")
 };
 
-const els = {};
-let refreshTimer = null;
+let latestUiState = null;
+let pollingToken = null;
 
-document.addEventListener("DOMContentLoaded", init);
+init();
 
 async function init() {
-  cacheEls();
-  bindPanelTabs();
-  renderSelectionLists();
-  renderManualFallbackOptions();
   bindEvents();
-  await loadSavedState();
-  await autoResetIfStuck();
-  await renderFromStorage();
-  refreshTimer = setInterval(renderFromStorage, 1200);
-}
-
-async function autoResetIfStuck() {
-  const data = await storageGet([STORAGE_KEYS.progress]);
-  const progress = data[STORAGE_KEYS.progress];
-
-  if (!progress) return;
-
-  const lastUpdate = progress.updatedAt ? new Date(progress.updatedAt).getTime() : 0;
-  const ageMs = Date.now() - lastUpdate;
-  const looksStuck =
-    (progress.phase === "capturing" || progress.phase === "uploading") &&
-    ageMs > 90 * 1000;
-
-  if (looksStuck) {
-    await storageSet({ [STORAGE_KEYS.progress]: null });
-    await sendRuntimeMessage({ type: "MODE_B_RESET_CAPTURE_LOCK" });
-    await addLocalStatus("Detected stuck capture from previous session. Cleared automatically.", "warn");
-  }
-}
-
-function cacheEls() {
-  els.clientName = document.getElementById("clientName");
-  els.dashboardUrl = document.getElementById("dashboardUrl");
-  els.backendUrl = document.getElementById("backendUrl");
-  els.saveSettingsBtn = document.getElementById("saveSettingsBtn");
-
-  els.tabSelection = document.getElementById("tabSelection");
-  els.filterSelection = document.getElementById("filterSelection");
-  els.includeBaseline = document.getElementById("includeBaseline");
-  els.startGuidedRunBtn = document.getElementById("startGuidedRunBtn");
-  els.finishRunBtn = document.getElementById("finishRunBtn");
-  els.loadLatestRunBtn = document.getElementById("loadLatestRunBtn");
-  els.openLatestReportBtn = document.getElementById("openLatestReportBtn");
-
-  els.runBadge = document.getElementById("runBadge");
-  els.currentStepBox = document.getElementById("currentStepBox");
-  els.doneCaptureBtn = document.getElementById("doneCaptureBtn");
-  els.skipStepBtn = document.getElementById("skipStepBtn");
-  els.retryStepBtn = document.getElementById("retryStepBtn");
-  els.pauseRunBtn = document.getElementById("pauseRunBtn");
-
-  els.manualPage = document.getElementById("manualPage");
-  els.manualStateType = document.getElementById("manualStateType");
-  els.manualFilterName = document.getElementById("manualFilterName");
-  els.manualFilterValue = document.getElementById("manualFilterValue");
-  els.manualCaptureBtn = document.getElementById("manualCaptureBtn");
-
-  els.statusLog = document.getElementById("statusLog");
-  els.chatHistory = document.getElementById("chatHistory");
-  els.chatInput = document.getElementById("chatInput");
-  els.sendChatBtn = document.getElementById("sendChatBtn");
-  els.clearChatBtn = document.getElementById("clearChatBtn");
-
-  els.progressCard = document.getElementById("progressCard");
-  els.captureProgressBar = document.getElementById("captureProgressBar");
-  els.uploadProgressBar = document.getElementById("uploadProgressBar");
-  els.extractionProgressBar = document.getElementById("extractionProgressBar");
-  els.captureProgressLabel = document.getElementById("captureProgressLabel");
-  els.uploadProgressLabel = document.getElementById("uploadProgressLabel");
-  els.extractionProgressLabel = document.getElementById("extractionProgressLabel");
-  els.progressMessage = document.getElementById("progressMessage");
-  els.resetLockBtn = document.getElementById("resetLockBtn");
-}
-
-function bindPanelTabs() {
-  const buttons = document.querySelectorAll(".tab-btn");
-  const panels = document.querySelectorAll(".panel");
-  buttons.forEach(btn => {
-    btn.addEventListener("click", () => {
-      buttons.forEach(x => x.classList.remove("active"));
-      panels.forEach(x => x.classList.remove("active"));
-      btn.classList.add("active");
-      document.getElementById(btn.dataset.panel).classList.add("active");
-    });
-  });
-}
-
-function renderSelectionLists() {
-  els.tabSelection.innerHTML = PAGE_OPTIONS.map(page => `
-    <label class="check-item">
-      <input type="checkbox" class="guided-tab" value="${escapeHtml(page)}" checked />
-      <span>${escapeHtml(page)}</span>
-    </label>
-  `).join("");
-
-  els.filterSelection.innerHTML = FILTER_CONFIG.map((f, idx) => `
-    <label class="check-item">
-      <input type="checkbox" class="guided-filter" value="${escapeHtml(f.filterName)}" ${idx < 2 ? "checked" : ""} />
-      <span>${escapeHtml(f.filterName)}</span>
-    </label>
-  `).join("");
-}
-
-function renderManualFallbackOptions() {
-  els.manualPage.innerHTML = [
-    `<option value="">Select tab</option>`,
-    ...PAGE_OPTIONS.map(p => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`)
-  ].join("");
-  els.manualFilterName.innerHTML = [
-    `<option value="">Select filter</option>`,
-    ...FILTER_CONFIG.map(f => `<option value="${escapeHtml(f.filterName)}">${escapeHtml(f.filterName)}</option>`)
-  ].join("");
-  refreshManualFilterValues(true);
+  await refreshUi();
 }
 
 function bindEvents() {
-  els.saveSettingsBtn.addEventListener("click", onSaveSettings);
-  els.startGuidedRunBtn.addEventListener("click", onStartGuidedRun);
+  els.startRunBtn.addEventListener("click", onStartRun);
+  els.refreshBtn.addEventListener("click", refreshUi);
   els.finishRunBtn.addEventListener("click", onFinishRun);
-  els.loadLatestRunBtn.addEventListener("click", onLoadLatestRun);
-  els.openLatestReportBtn.addEventListener("click", onOpenLatestReport);
-
-  els.doneCaptureBtn.addEventListener("click", () => onGuidedAction("MODE_B_DONE_CAPTURE_CURRENT_STEP"));
-  els.skipStepBtn.addEventListener("click", () => onGuidedAction("MODE_B_SKIP_CURRENT_STEP"));
-  els.retryStepBtn.addEventListener("click", () => onGuidedAction("MODE_B_RETRY_CURRENT_STEP"));
-  els.pauseRunBtn.addEventListener("click", () => onGuidedAction("MODE_B_TOGGLE_PAUSE_GUIDED_RUN"));
-
-  els.manualStateType.addEventListener("change", onManualStateChanged);
-  els.manualFilterName.addEventListener("change", onManualFilterChanged);
-  els.manualFilterValue.addEventListener("change", saveManualDraft);
-  els.manualPage.addEventListener("change", saveManualDraft);
-  els.manualCaptureBtn.addEventListener("click", onManualCapture);
-
-  els.clientName.addEventListener("input", debounce(saveSettingsDraft, 300));
-  els.dashboardUrl.addEventListener("input", debounce(saveSettingsDraft, 300));
-  els.backendUrl.addEventListener("input", debounce(saveSettingsDraft, 300));
-
-  els.sendChatBtn.addEventListener("click", onSendChat);
-  els.clearChatBtn.addEventListener("click", onClearChat);
-
-  els.resetLockBtn.addEventListener("click", async () => {
-  await storageSet({ [STORAGE_KEYS.progress]: null });
-  const response = await sendRuntimeMessage({ type: "MODE_B_RESET_CAPTURE_LOCK" });
-  if (response.ok) await addLocalStatus("Capture lock reset and progress cleared.", "ok");
-  else await addLocalStatus("Progress cleared but lock reset failed.", "warn");
-  await renderFromStorage();
-});
+  els.resetBtn.addEventListener("click", onReset);
+  els.captureBtn.addEventListener("click", onCapture);
+  els.skipBtn.addEventListener("click", onSkip);
+  els.askBtn.addEventListener("click", onAsk);
 }
 
-async function loadSavedState() {
-  const data = await storageGet([STORAGE_KEYS.settings, STORAGE_KEYS.manualDraft]);
-  const settings = data[STORAGE_KEYS.settings] || {};
-  const manual = data[STORAGE_KEYS.manualDraft] || {};
-
-  els.clientName.value = settings.clientName || "";
-  els.dashboardUrl.value = settings.dashboardUrl || "";
-  els.backendUrl.value = settings.backendUrl || "";
-
-  if (manual.pageName) els.manualPage.value = manual.pageName;
-  if (manual.stateType) els.manualStateType.value = manual.stateType;
-  if (manual.filterName) els.manualFilterName.value = manual.filterName;
-
-  refreshManualFilterValues(true);
-
-  if (manual.filterValue) {
-    els.manualFilterValue.value = manual.filterValue;
-  }
+async function refreshUi() {
+  const ui = await sendMessage({ type: "GET_UI_STATE" });
+  latestUiState = ui;
+  hydrateConfig(ui?.session || {});
+  renderUi(ui);
 }
 
-async function renderFromStorage() {
-  const data = await storageGet([
-    STORAGE_KEYS.activeRun,
-    STORAGE_KEYS.statusLog,
-    STORAGE_KEYS.chatHistory,
-    STORAGE_KEYS.progress
-  ]);
-  renderActiveRun(data[STORAGE_KEYS.activeRun] || null);
-  renderStatusLog(data[STORAGE_KEYS.statusLog] || []);
-  renderChatHistory(data[STORAGE_KEYS.chatHistory] || []);
-  renderProgress(data[STORAGE_KEYS.progress] || null);
-}
+async function onStartRun() {
+  clearChat();
+  clearProgress();
+  clearPostCapture();
 
-function renderActiveRun(run) {
-  if (!run) {
-    els.runBadge.textContent = "No active guided run";
-    els.currentStepBox.innerHTML = `
-      <div class="step-title">Waiting to start</div>
-      <div class="step-line">Start a guided run to generate the capture queue.</div>
-    `;
-    els.pauseRunBtn.textContent = "Pause Run";
-    return;
-  }
-
-  const total = run.queue?.length || 0;
-  const completed = (run.queue || []).filter(x => x.status === "completed").length;
-  const skipped = (run.queue || []).filter(x => x.status === "skipped").length;
-  const failed = (run.queue || []).filter(x => x.status === "failed").length;
-  const current = run.queue?.[run.currentIndex] || null;
-  const previous = run.currentIndex > 0 ? run.queue[run.currentIndex - 1] : null;
-
-  els.runBadge.textContent = `Active run: ${run.runId} • ${run.clientName} • ${completed}/${total} completed`;
-  els.pauseRunBtn.textContent = run.paused ? "Resume Run" : "Pause Run";
-
-  if (!current) {
-    els.currentStepBox.innerHTML = `
-      <div class="step-title">Guided run complete</div>
-      <div class="step-line">All steps are finished.</div>
-      <div class="step-line">Completed: <strong>${completed}</strong></div>
-      <div class="step-line">Skipped: <strong>${skipped}</strong></div>
-      <div class="step-line">Failed: <strong>${failed}</strong></div>
-    `;
-    return;
-  }
-
-  const previousHadFilter = !!(previous && previous.stateType === "filtered");
-  const currentIsFiltered = current.stateType === "filtered";
-
-  let resetInstruction = "";
-  if (currentIsFiltered) {
-    resetInstruction = `
-      <div class="reset-note">
-        Reset all filters to their default (Select All) before applying the new filter, so the captured state contains ONLY <strong>${escapeHtml(current.filterName)} = ${escapeHtml(current.filterValue)}</strong>.
-      </div>
-    `;
-  } else if (previousHadFilter) {
-    resetInstruction = `
-      <div class="reset-note">
-        This is a baseline step. Reset all filters (Select All) so no previous filter remains active.
-      </div>
-    `;
-  }
-
-  const instructionFilter = currentIsFiltered
-    ? `${current.filterName} = ${current.filterValue}`
-    : "No filter change required";
-
-  const title = currentIsFiltered
-    ? `${current.pageName} → ${current.filterName} → ${current.filterValue}`
-    : `${current.pageName} → Baseline`;
-
-  els.currentStepBox.innerHTML = `
-    <div class="step-title">Step ${run.currentIndex + 1} of ${total}</div>
-    <div class="step-big">${escapeHtml(title)}</div>
-    <div class="divider"></div>
-    <div class="step-line"><strong>Do this in Power BI:</strong></div>
-    <div class="step-line">1. Open tab: <strong>${escapeHtml(current.pageName)}</strong></div>
-    <div class="step-line">2. Reset all filters to <strong>Select All</strong></div>
-    <div class="step-line">3. Set state: <strong>${escapeHtml(current.stateType)}</strong></div>
-    <div class="step-line">4. Filter: <strong>${escapeHtml(instructionFilter)}</strong></div>
-    <div class="step-line">5. Wait for visuals to finish loading</div>
-    <div class="step-line">6. Click <strong>Done, Capture Now</strong></div>
-    ${resetInstruction}
-    <div class="divider"></div>
-    <div class="step-line">Progress → Completed: <strong>${completed}</strong>, Skipped: <strong>${skipped}</strong>, Failed: <strong>${failed}</strong></div>
-    <div class="step-line">Run paused: <strong>${run.paused ? "Yes" : "No"}</strong></div>
-  `;
-}
-
-function renderStatusLog(logs) {
-  if (!logs.length) {
-    els.statusLog.innerHTML = `
-      <div class="log-item">
-        <div class="log-time">Status</div>
-        No status yet.
-      </div>
-    `;
-    return;
-  }
-  els.statusLog.innerHTML = logs.map(log => `
-    <div class="log-item ${escapeHtml(log.tone || "info")}">
-      <div class="log-time">${escapeHtml(log.ts || "")}</div>
-      <div>${escapeHtml(log.text || "")}</div>
-    </div>
-  `).join("");
-}
-
-function renderChatHistory(history) {
-  if (!history.length) {
-    els.chatHistory.innerHTML = `
-      <div class="msg assistant">
-        <div class="msg-label">assistant</div>
-        No chat yet.
-      </div>
-    `;
-    return;
-  }
-  els.chatHistory.innerHTML = history.map(msg => `
-    <div class="msg ${escapeHtml(msg.role)}">
-      <div class="msg-label">${escapeHtml(msg.role)}</div>
-      ${escapeHtml(msg.text)}
-    </div>
-  `).join("");
-  els.chatHistory.scrollTop = els.chatHistory.scrollHeight;
-}
-
-function renderProgress(progress) {
-  if (!progress) {
-    els.progressCard.classList.remove("active");
-    return;
-  }
-  els.progressCard.classList.add("active");
-
-  const cap = Math.max(0, Math.min(100, Number(progress.captureProgress || 0)));
-  const up = Math.max(0, Math.min(100, Number(progress.uploadProgress || 0)));
-  const ex = Math.max(0, Math.min(100, Number(progress.extractionProgress || 0)));
-
-  els.captureProgressBar.style.width = `${cap}%`;
-  els.uploadProgressBar.style.width = `${up}%`;
-  els.extractionProgressBar.style.width = `${ex}%`;
-
-  els.captureProgressLabel.textContent = `${cap}%`;
-  els.uploadProgressLabel.textContent = `${up}%`;
-  els.extractionProgressLabel.textContent = `${ex}%`;
-
-  els.captureProgressBar.classList.remove("done", "failed");
-  els.uploadProgressBar.classList.remove("done", "failed");
-  els.extractionProgressBar.classList.remove("done", "failed");
-
-  if (progress.phase === "done") {
-    els.captureProgressBar.classList.add("done");
-    els.uploadProgressBar.classList.add("done");
-    els.extractionProgressBar.classList.add("done");
-  }
-  if (progress.phase === "failed") {
-    els.extractionProgressBar.classList.add("failed");
-  }
-
-  els.progressMessage.textContent = progress.message || "";
-}
-
-async function onSaveSettings() {
-  await storageSet({ [STORAGE_KEYS.settings]: collectSettings() });
-  await addLocalStatus("Settings saved.", "ok");
-}
-
-async function saveSettingsDraft() {
-  await storageSet({ [STORAGE_KEYS.settings]: collectSettings() });
-}
-
-function collectSettings() {
-  return {
+  const ui = await sendMessage({
+    type: "START_GUIDED_RUN",
     clientName: els.clientName.value.trim(),
-    dashboardUrl: els.dashboardUrl.value.trim(),
-    backendUrl: normalizeUrl(els.backendUrl.value.trim())
-  };
-}
+    backendUrl: els.backendUrl.value.trim(),
+    dashboardUrl: els.dashboardUrl.value.trim()
+  });
 
-function getSelectedTabs() {
-  return [...document.querySelectorAll(".guided-tab:checked")].map(x => x.value);
-}
-function getSelectedFilters() {
-  return [...document.querySelectorAll(".guided-filter:checked")].map(x => x.value);
-}
-
-function buildGuidedQueue(tabs, filters, includeBaseline) {
-  const queue = [];
-  let order = 1;
-  const baseStamp = Date.now();
-  for (const pageName of tabs) {
-    if (includeBaseline) {
-      queue.push({
-        stepId: `step_${baseStamp}_${order}`, order, pageName,
-        stateType: "baseline", filterName: "", filterValue: "", status: "pending"
-      });
-      order += 1;
-    }
-    for (const filterName of filters) {
-      const def = FILTER_MAP[filterName];
-      if (!def) continue;
-      for (const option of def.options) {
-        queue.push({
-          stepId: `step_${baseStamp}_${order}`, order, pageName,
-          stateType: "filtered", filterName, filterValue: option, status: "pending"
-        });
-        order += 1;
-      }
-    }
-  }
-  return queue;
-}
-
-async function onStartGuidedRun() {
-  const settings = collectSettings();
-  if (!settings.clientName) { await addLocalStatus("Client name is required.", "error"); return; }
-  if (!settings.dashboardUrl) { await addLocalStatus("Dashboard URL is required.", "error"); return; }
-  if (!settings.backendUrl) { await addLocalStatus("Backend URL is required.", "error"); return; }
-
-  const selectedTabs = getSelectedTabs();
-  const selectedFilters = getSelectedFilters();
-  const includeBaseline = els.includeBaseline.checked;
-
-  if (!selectedTabs.length) { await addLocalStatus("Select at least one tab.", "error"); return; }
-  if (!includeBaseline && !selectedFilters.length) {
-    await addLocalStatus("Select at least one filter or enable baseline.", "error"); return;
-  }
-
-  const queue = buildGuidedQueue(selectedTabs, selectedFilters, includeBaseline);
-  const runPayload = {
-    runId: `run_${Date.now()}`,
-    clientName: settings.clientName, dashboardUrl: settings.dashboardUrl,
-    backendUrl: settings.backendUrl,
-    mode: "GUIDED_CAPTURE_MANUAL_SET_AUTO_SCROLL",
-    startedAt: new Date().toISOString(),
-    paused: false, currentIndex: 0, queue
-  };
-
-  await storageSet({ [STORAGE_KEYS.settings]: settings });
-  const response = await sendRuntimeMessage({ type: "MODE_B_START_GUIDED_RUN", payload: runPayload });
-  if (response.ok) await addLocalStatus(`Guided run started with ${queue.length} steps.`, "ok");
-  else await addLocalStatus(`Could not start guided run: ${response.error || "Unknown error"}`, "error");
-  await renderFromStorage();
+  latestUiState = ui;
+  renderUi(ui);
 }
 
 async function onFinishRun() {
-  const response = await sendRuntimeMessage({ type: "MODE_B_FINISH_GUIDED_RUN" });
-  if (response.ok) await addLocalStatus("Active run finished.", "ok");
-  else await addLocalStatus(`Could not finish run: ${response.error || "Unknown error"}`, "error");
-  await storageSet({ [STORAGE_KEYS.progress]: null });
-  await renderFromStorage();
+  const ui = await sendMessage({ type: "FINISH_RUN" });
+  latestUiState = ui;
+  renderUi(ui);
 }
 
-async function onGuidedAction(type) {
-  if (type === "MODE_B_DONE_CAPTURE_CURRENT_STEP" || type === "MODE_B_RETRY_CURRENT_STEP") {
-    await storageSet({
-      [STORAGE_KEYS.progress]: {
-        phase: "capturing", captureProgress: 1, uploadProgress: 0, extractionProgress: 0,
-        message: "Starting capture...", updatedAt: new Date().toISOString()
-      }
-    });
-    await renderFromStorage();
-  }
-
-  const response = await sendRuntimeMessage({ type });
-  if (!response.ok) await addLocalStatus(response.error || "Action failed.", "error");
-  await renderFromStorage();
+async function onReset() {
+  stopPolling();
+  const ui = await sendMessage({ type: "RESET_LOCAL_SESSION" });
+  latestUiState = ui;
+  renderUi(ui);
+  clearProgress();
+  clearPostCapture();
+  clearChat();
 }
 
-function onManualStateChanged() {
-  if (els.manualStateType.value !== "filtered") els.manualFilterName.value = "";
-  refreshManualFilterValues(false);
-  saveManualDraft();
+async function onSkip() {
+  const ui = await sendMessage({ type: "SKIP_CURRENT_STEP" });
+  latestUiState = ui;
+  renderUi(ui);
 }
 
-function onManualFilterChanged() {
-  refreshManualFilterValues(false);
-  saveManualDraft();
-}
-
-function refreshManualFilterValues(keepValue = false) {
-  const prev = keepValue ? els.manualFilterValue.value : "";
-  if (els.manualStateType.value !== "filtered") {
-    els.manualFilterName.disabled = true;
-    els.manualFilterValue.disabled = true;
-    els.manualFilterValue.innerHTML = `<option value="">Not needed for baseline</option>`;
-    return;
-  }
-  els.manualFilterName.disabled = false;
-  els.manualFilterValue.disabled = false;
-
-  const filterName = els.manualFilterName.value;
-  if (!filterName || !FILTER_MAP[filterName]) {
-    els.manualFilterValue.innerHTML = `<option value="">Select filter first</option>`;
-    return;
-  }
-  const def = FILTER_MAP[filterName];
-  els.manualFilterValue.innerHTML = [
-    `<option value="">Select value</option>`,
-    ...def.options.map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`)
-  ].join("");
-  if (prev && def.options.includes(prev)) els.manualFilterValue.value = prev;
-}
-
-async function saveManualDraft() {
-  await storageSet({
-    [STORAGE_KEYS.manualDraft]: {
-      pageName: els.manualPage.value,
-      stateType: els.manualStateType.value,
-      filterName: els.manualStateType.value === "filtered" ? els.manualFilterName.value : "",
-      filterValue: els.manualStateType.value === "filtered" ? els.manualFilterValue.value : ""
-    }
-  });
-}
-
-async function onManualCapture() {
-  const settings = collectSettings();
-  if (!settings.backendUrl) { await addLocalStatus("Backend URL is required.", "error"); return; }
-
-  const pageName = els.manualPage.value;
-  const stateType = els.manualStateType.value;
-  const filterName = stateType === "filtered" ? els.manualFilterName.value : "";
-  const filterValue = stateType === "filtered" ? els.manualFilterValue.value : "";
-
-  if (!pageName) { await addLocalStatus("Select a tab for manual capture.", "error"); return; }
-  if (stateType === "filtered" && !filterName) { await addLocalStatus("Select a filter name for manual capture.", "error"); return; }
-  if (stateType === "filtered" && !filterValue) { await addLocalStatus("Select a filter value for manual capture.", "error"); return; }
-
-  await saveManualDraft();
-
-  await storageSet({
-    [STORAGE_KEYS.progress]: {
-      phase: "capturing", captureProgress: 1, uploadProgress: 0, extractionProgress: 0,
-      message: "Starting manual capture...", updatedAt: new Date().toISOString()
-    }
-  });
-  await renderFromStorage();
-
-  const response = await sendRuntimeMessage({
-    type: "MODE_B_MANUAL_CAPTURE_CURRENT_STATE",
-    payload: {
-      pageName, stateType, filterName, filterValue,
-      clientName: settings.clientName || "",
-      dashboardUrl: settings.dashboardUrl || "",
-      backendUrl: settings.backendUrl || ""
-    }
-  });
-
-  if (response.ok) await addLocalStatus("Manual capture requested.", "ok");
-  else await addLocalStatus(`Manual capture failed: ${response.error || "Unknown error"}`, "error");
-  await renderFromStorage();
-}
-
-async function onLoadLatestRun() {
-  const settings = collectSettings();
-  if (!settings.backendUrl) { await addLocalStatus("Backend URL is required.", "error"); return; }
-
+async function onCapture() {
   try {
-    const res = await fetch(`${settings.backendUrl}/latest-data`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    await addLocalStatus(buildLatestRunSummary(data), "ok");
-  } catch (err) { await addLocalStatus(`Could not load latest saved run: ${err.message}`, "error"); }
+    clearChat();
+    startProgressState();
+
+    const ui = await sendMessage({ type: "CAPTURE_CURRENT_STEP" });
+    latestUiState = ui;
+    renderUi(ui);
+
+    const lastCapture = ui?.lastCapture;
+    if (lastCapture?.statusUrl && ui?.session?.backendUrl) {
+      await pollStateStatus(ui.session.backendUrl, lastCapture.statusUrl, lastCapture);
+    }
+  } catch (error) {
+    setProgressMessage(`Capture failed: ${error.message || "Unknown error"}`);
+    els.screenshotStatus.textContent = "Error";
+    els.uploadStatus.textContent = "Error";
+    els.extractionStatus.textContent = "Error";
+  }
 }
 
-async function onOpenLatestReport() {
-  const settings = collectSettings();
-  if (!settings.backendUrl) { await addLocalStatus("Backend URL is required.", "error"); return; }
-  window.open(`${settings.backendUrl}/latest-report`, "_blank");
-  await addLocalStatus("Opened latest report.", "ok");
-}
-
-async function onSendChat() {
-  const question = els.chatInput.value.trim();
-  if (!question) { await addLocalStatus("Enter a question first.", "warn"); return; }
-
-  const data = await storageGet([STORAGE_KEYS.settings, STORAGE_KEYS.activeRun]);
-  const settings = data[STORAGE_KEYS.settings] || collectSettings();
-  const activeRun = data[STORAGE_KEYS.activeRun] || null;
-
-  if (!settings.backendUrl) { await addLocalStatus("Backend URL is required.", "error"); return; }
-
-  await appendChat("user", question);
-  els.chatInput.value = "";
-
+async function onAsk() {
   try {
-    const res = await fetch(`${settings.backendUrl}/ask`, {
+    const session = latestUiState?.session || {};
+    const question = els.chatQuestion.value.trim();
+
+    if (!session.runId) {
+      els.chatMeta.textContent = "No active run yet.";
+      els.chatAnswer.textContent = "";
+      return;
+    }
+    if (!session.backendUrl) {
+      els.chatMeta.textContent = "Backend URL is missing.";
+      els.chatAnswer.textContent = "";
+      return;
+    }
+    if (!question) {
+      els.chatMeta.textContent = "Enter a question first.";
+      els.chatAnswer.textContent = "";
+      return;
+    }
+
+    els.chatMeta.textContent = "Getting answer...";
+    els.chatAnswer.textContent = "";
+
+    const res = await fetch(joinUrl(session.backendUrl, "/ask"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        question,
-        clientName: settings.clientName || "",
-        runId: activeRun?.runId || "",
-        closedBook: true
-      })
+      body: JSON.stringify({ runId: session.runId, question })
     });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data?.error || "Ask request failed");
 
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const json = await res.json();
-    const answer = json.answer || json.response || json.result || "No answer returned.";
-    await appendChat("assistant", answer);
-    await addLocalStatus("Chat answer received.", "ok");
-  } catch (err) {
-    const msg = `Chat failed: ${err.message}`;
-    await appendChat("assistant", msg);
-    await addLocalStatus(msg, "error");
+    const meta = [];
+    if (data.mode) meta.push(`mode: ${data.mode}`);
+    if (data.reason) meta.push(`reason: ${data.reason}`);
+    if (data.warning) meta.push(`warning: ${data.warning}`);
+    els.chatMeta.textContent = meta.length ? meta.join(" | ") : "Answer ready";
+    els.chatAnswer.textContent = data.answer || "No answer returned.";
+  } catch (error) {
+    els.chatMeta.textContent = `Ask failed: ${error.message || "Unknown error"}`;
+    els.chatAnswer.textContent = "";
   }
 }
 
-async function onClearChat() {
-  await storageSet({ [STORAGE_KEYS.chatHistory]: [] });
-  await renderFromStorage();
-  await addLocalStatus("Chat cleared.", "ok");
+function hydrateConfig(session) {
+  els.clientName.value = session.clientName || "";
+  els.backendUrl.value = session.backendUrl || "";
+  els.dashboardUrl.value = session.dashboardUrl || "";
 }
 
-function buildLatestRunSummary(data) {
-  if (!data) return "Latest run returned empty response.";
-  if (typeof data === "string") return `Latest run: ${data}`;
-  const parts = ["Latest run loaded."];
-  if (data.runId) parts.push(`runId=${data.runId}`);
-  if (data.clientName) parts.push(`client=${data.clientName}`);
-  if (typeof data.totalStates !== "undefined") parts.push(`states=${data.totalStates}`);
-  if (typeof data.totalSlices !== "undefined") parts.push(`slices=${data.totalSlices}`);
-  if (Array.isArray(data.extractedRows)) parts.push(`datapoints=${data.extractedRows.length}`);
-  return parts.join(" ");
+function renderUi(ui) {
+  const session = ui?.session || {};
+  const currentStep = ui?.currentStep || null;
+  const nextStep = ui?.nextStep || null;
+
+  els.runIdText.textContent = session.runId || "--";
+  els.progressText.textContent = `${ui?.completedSteps || 0} / ${ui?.totalSteps || 0}`;
+  els.currentStepText.textContent = currentStep ? formatStep(currentStep) : "--";
+  els.nextStepText.textContent = nextStep ? formatStep(nextStep) : "Run complete";
+  els.runStatusText.textContent = session.status || "idle";
+
+  if (ui?.lastCapture) showPostCapture(session, ui.lastCapture, nextStep);
+  else clearPostCapture();
+
+  const locked = session.status === "completed";
+  els.captureBtn.disabled = locked;
+  els.skipBtn.disabled = locked;
 }
 
-async function appendChat(role, text) {
-  const data = await storageGet([STORAGE_KEYS.chatHistory]);
-  const history = data[STORAGE_KEYS.chatHistory] || [];
-  history.push({ role, text, ts: new Date().toISOString() });
-  await storageSet({ [STORAGE_KEYS.chatHistory]: history.slice(-50) });
-  await renderFromStorage();
+function showPostCapture(session, lastCapture, nextStep) {
+  els.postCaptureCard.classList.remove("hidden");
+  els.uploadStatusLine.textContent = "Completed";
+  els.extractionStatusLine.textContent = capitalize(lastCapture.status || "queued");
+  els.summaryAvailabilityLine.textContent = lastCapture.summaryAvailable ? "Available" : "Pending";
+  els.postNextStepLine.textContent = nextStep ? formatStep(nextStep) : "Run complete";
+  els.resultMessage.textContent = lastCapture.message || "Capture uploaded successfully.";
+
+  if (lastCapture.reportUrl && session.backendUrl) {
+    els.viewReportBtn.href = joinUrl(session.backendUrl, lastCapture.reportUrl);
+    els.viewReportBtn.classList.remove("hidden");
+  } else {
+    els.viewReportBtn.classList.add("hidden");
+  }
+
+  if (lastCapture.latestDataUrl && session.backendUrl) {
+    els.viewLatestBtn.href = joinUrl(session.backendUrl, lastCapture.latestDataUrl);
+    els.viewLatestBtn.classList.remove("hidden");
+  } else {
+    els.viewLatestBtn.classList.add("hidden");
+  }
 }
 
-async function addLocalStatus(text, tone = "info") {
-  const data = await storageGet([STORAGE_KEYS.statusLog]);
-  const logs = data[STORAGE_KEYS.statusLog] || [];
-  logs.unshift({ ts: new Date().toLocaleString(), text, tone });
-  await storageSet({ [STORAGE_KEYS.statusLog]: logs.slice(0, 150) });
+function startProgressState() {
+  stopPolling();
+  els.progressCard.classList.remove("hidden");
+  els.screenshotStatus.textContent = "In progress";
+  els.uploadStatus.textContent = "Waiting";
+  els.extractionStatus.textContent = "Waiting";
+  setBar(els.screenshotBar, 35);
+  setBar(els.uploadBar, 0);
+  setBar(els.extractionBar, 0);
+  setProgressMessage("Capturing screenshot...");
 }
 
-function normalizeUrl(url) { return url.replace(/\/+$/, ""); }
-function debounce(fn, wait) {
-  let t = null;
-  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), wait); };
+function clearProgress() {
+  els.progressCard.classList.add("hidden");
+  setBar(els.screenshotBar, 0);
+  setBar(els.uploadBar, 0);
+  setBar(els.extractionBar, 0);
 }
 
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
+function clearPostCapture() {
+  els.postCaptureCard.classList.add("hidden");
+  els.viewReportBtn.classList.add("hidden");
+  els.viewLatestBtn.classList.add("hidden");
 }
 
-function storageGet(keys) {
-  return new Promise(resolve => chrome.storage.local.get(keys, result => resolve(result || {})));
-}
-function storageSet(obj) {
-  return new Promise(resolve => chrome.storage.local.set(obj, () => resolve()));
-}
-function sendRuntimeMessage(message) {
-  return new Promise(resolve => {
+async function pollStateStatus(backendUrl, statusUrl, lastCapture) {
+  stopPolling();
+  const token = `${backendUrl}|${statusUrl}|${Date.now()}`;
+  pollingToken = token;
+
+  els.screenshotStatus.textContent = "Completed";
+  setBar(els.screenshotBar, 100);
+  els.uploadStatus.textContent = "Completed";
+  setBar(els.uploadBar, 100);
+  els.extractionStatus.textContent = "Queued";
+  setBar(els.extractionBar, 10);
+  setProgressMessage("Upload complete. Waiting for extraction...");
+
+  for (let i = 0; i < 120; i++) {
+    if (pollingToken !== token) return;
     try {
-      chrome.runtime.sendMessage(message, response => {
-        if (chrome.runtime.lastError) {
-          resolve({ ok: false, error: chrome.runtime.lastError.message });
-          return;
-        }
-        resolve(response || { ok: true });
-      });
-    } catch (err) { resolve({ ok: false, error: err.message }); }
+      const res = await fetch(joinUrl(backendUrl, statusUrl));
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Polling failed");
+
+      const status = data.status || "unknown";
+      els.extractionStatus.textContent = capitalize(status);
+
+      if (status === "queued") {
+        setBar(els.extractionBar, 20);
+        setProgressMessage("Extraction queued...");
+      } else if (status === "running") {
+        setBar(els.extractionBar, 65);
+        setProgressMessage("AI extraction running...");
+      } else if (status === "completed") {
+        setBar(els.extractionBar, 100);
+        setProgressMessage(`Extraction complete. Numeric rows: ${data.numericRowCount || 0}`);
+        latestUiState.lastCapture = {
+          ...lastCapture,
+          status,
+          summaryAvailable: Boolean(data.summaryAvailable),
+          numericRowCount: data.numericRowCount || 0,
+          summary: data.summary || "",
+          message: data.numericRowCount > 0
+            ? `Extraction complete. Numeric rows found: ${data.numericRowCount}.`
+            : "Extraction complete. No numeric rows found; summary fallback may still be available."
+        };
+        renderUi(latestUiState);
+        stopPolling();
+        return;
+      } else if (status === "failed") {
+        setBar(els.extractionBar, 100);
+        setProgressMessage(`Extraction failed: ${data.error || "Unknown error"}`);
+        latestUiState.lastCapture = {
+          ...lastCapture,
+          status,
+          summaryAvailable: false,
+          message: `Extraction failed: ${data.error || "Unknown error"}`
+        };
+        renderUi(latestUiState);
+        stopPolling();
+        return;
+      }
+    } catch (error) {
+      setProgressMessage(`Status polling error: ${error.message || "Unknown error"}`);
+    }
+    await sleep(2000);
+  }
+
+  setProgressMessage("Extraction is taking longer than expected. You can still open the report or latest data links.");
+}
+
+function clearChat() {
+  els.chatMeta.textContent = "No answer yet.";
+  els.chatAnswer.textContent = "";
+}
+
+function setProgressMessage(text) { els.progressMessage.textContent = text; }
+function setBar(el, percent) { el.style.width = `${Math.max(0, Math.min(100, percent))}%`; }
+function stopPolling() { pollingToken = null; }
+function formatStep(step) { return `${step.pageName} > ${step.filterName} > ${step.filterValue}`; }
+function capitalize(v) { const s = String(v || ""); return s ? s[0].toUpperCase() + s.slice(1) : s; }
+function joinUrl(base, p) { if (!p) return base; if (/^https?:\/\//i.test(p)) return p; return `${String(base).replace(/\/+$/, "")}/${String(p).replace(/^\/+/, "")}`; }
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+function sendMessage(message) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(message, (response) => {
+      const err = chrome.runtime.lastError;
+      if (err) return reject(new Error(err.message));
+      if (response?.ok === false && response?.error) return reject(new Error(response.error));
+      resolve(response);
+    });
   });
 }
