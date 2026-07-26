@@ -296,6 +296,7 @@ app.post("/ask", async (req, res) => {
   }
 });
 
+app.use("/analyst", analystUploadRoutes);
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`PowerBI backend listening on port ${PORT}`);
 });
