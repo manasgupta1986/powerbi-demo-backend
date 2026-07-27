@@ -6,6 +6,7 @@ const fsp = require("fs/promises");
 const path = require("path");
 const analystAnalyzeRoutes = require("./analyst/routesAnalyze");
 const analystChatRoutes = require("./analyst/routesChat");
+const analystReportRoutes = require("./analyst/routesReport");
 
 const app = express();
 const PORT = process.env.PORT || 10000;
