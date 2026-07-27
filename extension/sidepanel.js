@@ -51,6 +51,7 @@ const state = {
   analysisInProgress: false,
   latestStatus: null,
   latestAnalysis: null,
+  latestReportPayload: null,
   chatMessages: []
 };
 
@@ -65,7 +66,9 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   await checkBackend();
   await refreshLatestRun();
+  await refreshAnalysisStatusSilently();
   await refreshLatestAnalysis();
+  await refreshLatestReport();
 });
 
 function cacheDom() {
@@ -112,7 +115,17 @@ function cacheDom() {
 
 function bindEvents() {
   document.querySelectorAll(".tab-btn").forEach((btn) => {
-    btn.addEventListener("click", () => setActiveTab(btn.dataset.tab));
+    btn.addEventListener("click", async () => {
+      setActiveTab(btn.dataset.tab);
+
+      if (btn.dataset.tab === "tab-report") {
+        await refreshLatestReport();
+      }
+
+      if (btn.dataset.tab === "tab-chat") {
+        renderChat();
+      }
+    });
   });
 
   els.saveSettingsBtn.addEventListener("click", async () => {
@@ -143,7 +156,8 @@ function bindEvents() {
 
   els.startAnalysisBtn.addEventListener("click", startAnalysisFlow);
   els.refreshStatusBtn.addEventListener("click", refreshAnalysisStatus);
-  els.refreshReportBtn.addEventListener("click", refreshLatestAnalysis);
+
+  els.refreshReportBtn.addEventListener("click", refreshLatestReport);
 
   els.sendChatBtn.addEventListener("click", sendChatMessage);
   els.clearChatBtn.addEventListener("click", clearChat);
@@ -527,7 +541,13 @@ async function startUploadFlow() {
 
     const runId = startRes.runId;
     state.currentRunId = runId;
+    state.latestStatus = null;
+    state.latestAnalysis = null;
+    state.latestReportPayload = null;
+    state.chatMessages = [];
     await persistState();
+    renderChat();
+    renderReport();
 
     let uploadedCount = 0;
 
@@ -556,6 +576,7 @@ async function startUploadFlow() {
       await persistState();
       renderQueue();
 
+      els.analysisProgress.classList.remove("empty-state");
       els.analysisProgress.innerHTML = `
         <div><strong>Upload in progress</strong></div>
         <div class="muted">Run ID: ${escapeHtml(runId)}</div>
@@ -571,6 +592,7 @@ async function startUploadFlow() {
       })
     });
 
+    els.analysisProgress.classList.remove("empty-state");
     els.analysisProgress.innerHTML = `
       <div><strong>Upload completed</strong></div>
       <div class="muted">Run ID: ${escapeHtml(runId)}</div>
@@ -582,6 +604,7 @@ async function startUploadFlow() {
     notify("Upload completed");
   } catch (error) {
     setPill(els.analysisStatus, "Upload failed", "danger");
+    els.analysisProgress.classList.remove("empty-state");
     els.analysisProgress.innerHTML = `
       <div><strong>Upload failed</strong></div>
       <div class="muted">${escapeHtml(error.message || "Unknown error")}</div>
@@ -610,7 +633,7 @@ async function refreshLatestRun() {
       await persistState();
     }
   } catch (error) {
-    // silently ignore
+    // ignore
   }
 }
 
@@ -638,6 +661,7 @@ async function startAnalysisFlow() {
       })
     });
 
+    els.analysisProgress.classList.remove("empty-state");
     els.analysisProgress.innerHTML = `
       <div><strong>Analysis started</strong></div>
       <div class="muted">Run ID: ${escapeHtml(payload.runId || state.currentRunId)}</div>
@@ -648,6 +672,7 @@ async function startAnalysisFlow() {
     await pollAnalysisStatus();
   } catch (error) {
     setPill(els.analysisStatus, "Failed", "danger");
+    els.analysisProgress.classList.remove("empty-state");
     els.analysisProgress.innerHTML = `
       <div><strong>Could not start analysis</strong></div>
       <div class="muted">${escapeHtml(error.message || "Unknown error")}</div>
@@ -674,17 +699,40 @@ async function refreshAnalysisStatus() {
     );
 
     state.latestStatus = payload;
-    renderAnalysisStatus();
 
     if (payload?.analysis) {
       state.latestAnalysis = payload.analysis;
-      renderReport();
     }
+
+    renderAnalysisStatus();
+    await refreshLatestReport();
   } catch (error) {
+    els.analysisProgress.classList.remove("empty-state");
     els.analysisProgress.innerHTML = `
       <div><strong>Status refresh failed</strong></div>
       <div class="muted">${escapeHtml(error.message || "Unknown error")}</div>
     `;
+  }
+}
+
+async function refreshAnalysisStatusSilently() {
+  if (!state.currentRunId) return;
+
+  try {
+    const payload = await api(
+      `/analyst/analyze/status?workspaceName=${encodeURIComponent(
+        state.settings.workspaceName
+      )}&runId=${encodeURIComponent(state.currentRunId)}`,
+      { method: "GET" }
+    );
+
+    state.latestStatus = payload;
+    if (payload?.analysis) {
+      state.latestAnalysis = payload.analysis;
+    }
+    renderAnalysisStatus();
+  } catch (error) {
+    // ignore
   }
 }
 
@@ -703,21 +751,24 @@ async function pollAnalysisStatus() {
       );
 
       state.latestStatus = payload;
+      if (payload?.analysis) {
+        state.latestAnalysis = payload.analysis;
+      }
+
       renderAnalysisStatus();
 
       const status = payload?.status || "";
 
       if (status === "completed" || status === "failed") {
         keepPolling = false;
-        if (payload?.analysis) {
-          state.latestAnalysis = payload.analysis;
-        }
         await refreshLatestAnalysis();
+        await refreshLatestReport();
         renderReport();
         break;
       }
     } catch (error) {
       keepPolling = false;
+      els.analysisProgress.classList.remove("empty-state");
       els.analysisProgress.innerHTML = `
         <div><strong>Polling failed</strong></div>
         <div class="muted">${escapeHtml(error.message || "Unknown error")}</div>
@@ -787,33 +838,66 @@ async function refreshLatestAnalysis() {
     );
 
     state.latestAnalysis = payload?.latest?.analysis || null;
+
+    if (payload?.latest?.run?.runId) {
+      state.currentRunId = payload.latest.run.runId;
+      await persistState();
+    }
+  } catch (error) {
+    // ignore
+  }
+}
+
+async function refreshLatestReport() {
+  try {
+    syncSettingsFromDom();
+
+    const payload = await api(
+      `/analyst/report/latest?workspaceName=${encodeURIComponent(
+        state.settings.workspaceName
+      )}`,
+      { method: "GET" }
+    );
+
+    state.latestReportPayload = payload;
+
+    if (payload?.runId) {
+      state.currentRunId = payload.runId;
+      await persistState();
+    }
+
     renderReport();
   } catch (error) {
+    state.latestReportPayload = null;
     renderReport();
   }
 }
 
 function renderReport() {
+  const reportPayload = state.latestReportPayload;
   const analysis = state.latestAnalysis;
 
-  if (!analysis || !analysis.report) {
+  const report = reportPayload?.report || analysis?.report || null;
+  const summary = reportPayload?.summary || analysis?.summary || "";
+
+  if (!report) {
     setPill(els.reportStatus, "No report", "muted");
     els.reportContainer.innerHTML = "No report available yet.";
     els.reportContainer.classList.add("empty-state");
     els.openReportLink.href = "#";
+    els.openReportLink.setAttribute("aria-disabled", "true");
     return;
   }
 
-  const report = analysis.report;
-  els.reportContainer.classList.remove("empty-state");
   setPill(els.reportStatus, "Ready", "success");
+  els.reportContainer.classList.remove("empty-state");
 
   els.reportContainer.innerHTML = `
     <div class="report-section">
       <h3>${escapeHtml(report.title || "Summary Report")}</h3>
       ${
-        analysis.summary
-          ? `<div class="report-summary">${escapeHtml(analysis.summary)}</div>`
+        summary
+          ? `<div class="report-summary">${escapeHtml(summary)}</div>`
           : ""
       }
     </div>
@@ -824,7 +908,14 @@ function renderReport() {
     ${renderListSection("Data Quality Notes", report.data_quality_notes)}
   `;
 
-  els.openReportLink.href = "#";
+  const htmlReportUrl = reportPayload?.htmlReportUrl || "";
+  if (htmlReportUrl) {
+    els.openReportLink.href = absolutizeBackendPath(htmlReportUrl);
+    els.openReportLink.removeAttribute("aria-disabled");
+  } else {
+    els.openReportLink.href = "#";
+    els.openReportLink.setAttribute("aria-disabled", "true");
+  }
 }
 
 function renderListSection(title, items) {
@@ -965,6 +1056,22 @@ async function api(path, options = {}) {
   }
 
   return payload;
+}
+
+function absolutizeBackendPath(relativeOrAbsolute) {
+  if (!relativeOrAbsolute) return "#";
+  if (/^https?:\/\//i.test(relativeOrAbsolute)) return relativeOrAbsolute;
+
+  const baseUrl = sanitizeUrl(
+    state.settings.backendUrl || els.backendUrl.value || ""
+  );
+  if (!baseUrl) return relativeOrAbsolute;
+
+  if (relativeOrAbsolute.startsWith("/")) {
+    return `${baseUrl}${relativeOrAbsolute}`;
+  }
+
+  return `${baseUrl}/${relativeOrAbsolute}`;
 }
 
 function setPill(el, text, tone = "muted") {
