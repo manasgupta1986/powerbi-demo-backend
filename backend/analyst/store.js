@@ -42,9 +42,11 @@ function getWorkspaceParts(workspaceName) {
   const workspaceDir = path.join(DATA_DIR, "analyst", workspaceKey);
   const uploadsDir = path.join(workspaceDir, "uploads");
   const analysisDir = path.join(workspaceDir, "analysis");
+
   ensureDir(workspaceDir);
   ensureDir(uploadsDir);
   ensureDir(analysisDir);
+
   return { workspaceKey, workspaceDir, uploadsDir, analysisDir };
 }
 
@@ -74,6 +76,7 @@ function createRun({ workspaceName, clientName = "", operatorName = "" }) {
     fileCount: 0,
     numericRowCount: 0,
     textRowCount: 0,
+    hasUsableData: false,
     files: []
   };
 
@@ -82,9 +85,14 @@ function createRun({ workspaceName, clientName = "", operatorName = "" }) {
   return run;
 }
 
-function getLatestRun(workspaceName) {
+function listRuns(workspaceName, limit = 20) {
   const runsFile = getRunsFile(workspaceName);
   const runs = readJson(runsFile, []);
+  return runs.slice(0, limit);
+}
+
+function getLatestRun(workspaceName) {
+  const runs = listRuns(workspaceName, 1);
   return runs.length ? runs[0] : null;
 }
 
@@ -203,6 +211,14 @@ function updateRunStatus({ workspaceName, runId, status, error = null }) {
   return runs[idx];
 }
 
+function computeUsability(analysis) {
+  const numericRows = Array.isArray(analysis.numeric_rows) ? analysis.numeric_rows.length : 0;
+  const textRows = Array.isArray(analysis.text_rows) ? analysis.text_rows.length : 0;
+  const summary = typeof analysis.summary === "string" ? analysis.summary.trim() : "";
+
+  return numericRows > 0 || textRows > 0 || summary.length > 0;
+}
+
 function saveAnalysis({ workspaceName, runId, analysis }) {
   const analysisFile = getAnalysisFile(workspaceName, runId);
   writeJson(analysisFile, analysis);
@@ -221,6 +237,8 @@ function saveAnalysis({ workspaceName, runId, analysis }) {
     runs[idx].textRowCount = Array.isArray(analysis.text_rows)
       ? analysis.text_rows.length
       : 0;
+    runs[idx].hasUsableData = computeUsability(analysis);
+
     writeJson(runsFile, runs);
   }
 
@@ -233,10 +251,10 @@ function getAnalysis(workspaceName, runId) {
 }
 
 function getLatestCompletedAnalysis(workspaceName) {
-  const runsFile = getRunsFile(workspaceName);
-  const runs = readJson(runsFile, []);
+  const runs = listRuns(workspaceName, 50);
 
   for (const run of runs) {
+    if (run.status !== "completed") continue;
     const analysis = getAnalysis(workspaceName, run.runId);
     if (analysis) {
       return {
@@ -251,6 +269,7 @@ function getLatestCompletedAnalysis(workspaceName) {
 
 module.exports = {
   createRun,
+  listRuns,
   getLatestRun,
   getRun,
   addFileToRun,
