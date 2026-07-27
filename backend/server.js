@@ -4,6 +4,7 @@ const analystUploadRoutes = require("./analyst/routesUpload");
 const fs = require("fs");
 const fsp = require("fs/promises");
 const path = require("path");
+const analystAnalyzeRoutes = require("./analyst/routesAnalyze");
 
 const app = express();
 const PORT = process.env.PORT || 10000;
