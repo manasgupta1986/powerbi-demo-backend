@@ -44,6 +44,7 @@ async function askGroundedChat({
   const groundedContext = {
     workspaceName,
     runId,
+    generatedAt: analysis.createdAt || "",
     summary: ensureString(analysis.summary),
     report: analysis.report || {},
     numeric_rows: ensureArray(analysis.numeric_rows),
@@ -68,7 +69,7 @@ async function askGroundedChat({
             "Do not use outside knowledge.",
             "If the answer is not grounded in the supplied data, say so clearly.",
             "Answer in a concise but analytical style.",
-            "When possible, mention the source screenshot file name or filter context."
+            "When possible, mention the source screenshot file name, run timestamp, or filter context."
           ].join(" ")
         },
         {
@@ -179,13 +180,14 @@ router.post("/chat", async (req, res) => {
 
     const numericRows = ensureArray(analysis.numeric_rows);
     const textRows = ensureArray(analysis.text_rows);
+    const summary = ensureString(analysis.summary).trim();
 
-    if (!numericRows.length && !textRows.length) {
+    if (!numericRows.length && !textRows.length && !summary) {
       return res.status(409).json({
         ok: false,
-        reason: "no_numeric_rows",
+        reason: "no_usable_rows",
         message:
-          "Extraction completed but no usable rows were found in this capture."
+          "Analysis completed, but no usable extracted data was found in this run. Please retry with a clearer screenshot or another crop."
       });
     }
 
@@ -201,7 +203,13 @@ router.post("/chat", async (req, res) => {
       ok: true,
       workspaceName,
       runId: resolvedRunId,
-      answer
+      answer,
+      reference: {
+        runId: resolvedRunId,
+        createdAt: run.createdAt,
+        finishedAt: run.finishedAt,
+        generatedAt: analysis.createdAt || run.finishedAt || run.createdAt
+      }
     });
   } catch (error) {
     return res.status(500).json({
@@ -212,4 +220,3 @@ router.post("/chat", async (req, res) => {
 });
 
 module.exports = router;
-
