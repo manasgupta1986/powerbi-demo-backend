@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 
 const {
+  listRuns,
   getRun,
   getAnalysis,
   getLatestCompletedAnalysis
@@ -22,6 +23,46 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+function hasUsableData(analysis) {
+  if (!analysis) return false;
+  const numericRows = ensureArray(analysis.numeric_rows).length;
+  const textRows = ensureArray(analysis.text_rows).length;
+  const summary = ensureString(analysis.summary).trim();
+  return numericRows > 0 || textRows > 0 || summary.length > 0;
+}
+
+function buildHistoryItem(workspaceName, run, analysis) {
+  const usable = hasUsableData(analysis);
+
+  return {
+    runId: run.runId,
+    workspaceName,
+    status: run.status,
+    createdAt: run.createdAt,
+    finishedAt: run.finishedAt,
+    clientName: run.clientName || "",
+    operatorName: run.operatorName || "",
+    fileCount: run.fileCount || 0,
+    numericRowCount: analysis
+      ? ensureArray(analysis.numeric_rows).length
+      : run.numericRowCount || 0,
+    textRowCount: analysis
+      ? ensureArray(analysis.text_rows).length
+      : run.textRowCount || 0,
+    hasSummary: Boolean(ensureString(analysis?.summary).trim()),
+    hasReport: Boolean(analysis?.report),
+    hasUsableData: usable,
+    title:
+      ensureString(analysis?.report?.title) ||
+      `Run ${run.runId}`,
+    htmlReportUrl: analysis
+      ? `/analyst/report/html?workspaceName=${encodeURIComponent(
+          workspaceName
+        )}&runId=${encodeURIComponent(run.runId)}`
+      : null
+  };
 }
 
 function renderListSection(title, items) {
@@ -71,7 +112,7 @@ function renderRowsTable(title, rows, columns) {
   `;
 }
 
-function buildReportHtml({ workspaceName, runId, analysis }) {
+function buildReportHtml({ workspaceName, runId, analysis, run }) {
   const report = analysis?.report || {};
   const summary = ensureString(analysis?.summary);
   const numericRows = ensureArray(analysis?.numeric_rows);
@@ -97,11 +138,7 @@ function buildReportHtml({ workspaceName, runId, analysis }) {
       --shadow: 0 8px 24px rgba(16, 35, 70, 0.08);
       --radius: 16px;
     }
-
-    * {
-      box-sizing: border-box;
-    }
-
+    * { box-sizing: border-box; }
     body {
       margin: 0;
       font-family: Inter, Arial, sans-serif;
@@ -109,13 +146,11 @@ function buildReportHtml({ workspaceName, runId, analysis }) {
       color: var(--text);
       line-height: 1.5;
     }
-
     .wrap {
       max-width: 1180px;
       margin: 0 auto;
       padding: 28px 18px 48px;
     }
-
     .hero {
       background: linear-gradient(135deg, #0f1f3b, #18315f);
       color: #fff;
@@ -124,24 +159,14 @@ function buildReportHtml({ workspaceName, runId, analysis }) {
       box-shadow: var(--shadow);
       margin-bottom: 18px;
     }
-
-    .hero h1 {
-      margin: 0 0 8px;
-      font-size: 28px;
-    }
-
-    .meta {
-      color: #d5def1;
-      font-size: 14px;
-    }
-
+    .hero h1 { margin: 0 0 8px; font-size: 28px; }
+    .meta { color: #d5def1; font-size: 14px; }
     .grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 18px;
       margin-bottom: 18px;
     }
-
     .card {
       background: var(--card);
       border: 1px solid var(--border);
@@ -150,34 +175,16 @@ function buildReportHtml({ workspaceName, runId, analysis }) {
       padding: 18px;
       margin-bottom: 18px;
     }
-
-    .card h2 {
-      margin: 0 0 12px;
-      font-size: 18px;
-    }
-
-    .summary {
-      white-space: pre-wrap;
-      color: var(--text);
-    }
-
-    ul {
-      margin: 0;
-      padding-left: 20px;
-    }
-
-    li {
-      margin-bottom: 8px;
-      color: var(--text);
-    }
-
+    .card h2 { margin: 0 0 12px; font-size: 18px; }
+    .summary { white-space: pre-wrap; color: var(--text); }
+    ul { margin: 0; padding-left: 20px; }
+    li { margin-bottom: 8px; }
     .kpi-row {
       display: flex;
       gap: 14px;
       flex-wrap: wrap;
       margin-top: 12px;
     }
-
     .kpi {
       background: #eef4ff;
       color: #0f2b5d;
@@ -187,17 +194,12 @@ function buildReportHtml({ workspaceName, runId, analysis }) {
       font-size: 13px;
       font-weight: 700;
     }
-
-    .table-wrap {
-      overflow-x: auto;
-    }
-
+    .table-wrap { overflow-x: auto; }
     table {
       width: 100%;
       border-collapse: collapse;
       min-width: 900px;
     }
-
     th, td {
       border-bottom: 1px solid var(--border);
       text-align: left;
@@ -205,27 +207,10 @@ function buildReportHtml({ workspaceName, runId, analysis }) {
       vertical-align: top;
       font-size: 13px;
     }
-
-    th {
-      background: #f1f6ff;
-      color: #20365f;
-      position: sticky;
-      top: 0;
-    }
-
-    .muted {
-      color: var(--muted);
-      font-size: 13px;
-    }
-
+    th { background: #f1f6ff; color: #20365f; }
     @media (max-width: 860px) {
-      .grid {
-        grid-template-columns: 1fr;
-      }
-
-      .hero h1 {
-        font-size: 24px;
-      }
+      .grid { grid-template-columns: 1fr; }
+      .hero h1 { font-size: 24px; }
     }
   </style>
 </head>
@@ -235,10 +220,12 @@ function buildReportHtml({ workspaceName, runId, analysis }) {
       <h1>${escapeHtml(title)}</h1>
       <div class="meta">Workspace: ${escapeHtml(workspaceName)}</div>
       <div class="meta">Run ID: ${escapeHtml(runId)}</div>
+      <div class="meta">Generated: ${escapeHtml(analysis?.createdAt || run?.finishedAt || run?.createdAt || "")}</div>
       <div class="meta">Generated from uploaded dashboard screenshots and grounded AI extraction.</div>
       <div class="kpi-row">
         <div class="kpi">Numeric rows: ${numericRows.length}</div>
         <div class="kpi">Text rows: ${textRows.length}</div>
+        <div class="kpi">Usable data: ${hasUsableData(analysis) ? "Yes" : "Needs review"}</div>
       </div>
     </section>
 
@@ -283,6 +270,31 @@ function buildReportHtml({ workspaceName, runId, analysis }) {
 </html>`;
 }
 
+router.get("/report/history", async (req, res) => {
+  try {
+    const workspaceName = req.query.workspaceName || "default-workspace";
+    const limit = Number(req.query.limit || 20);
+    const runs = listRuns(workspaceName, limit);
+
+    const items = runs.map((run) => {
+      const analysis = getAnalysis(workspaceName, run.runId);
+      return buildHistoryItem(workspaceName, run, analysis);
+    });
+
+    return res.json({
+      ok: true,
+      workspaceName,
+      generatedAt: new Date().toISOString(),
+      items
+    });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: error.message || "Failed to fetch report history"
+    });
+  }
+});
+
 router.get("/report/latest", async (req, res) => {
   try {
     const workspaceName = req.query.workspaceName || "default-workspace";
@@ -299,10 +311,14 @@ router.get("/report/latest", async (req, res) => {
       ok: true,
       workspaceName,
       runId: latest.run.runId,
+      createdAt: latest.run.createdAt,
+      finishedAt: latest.run.finishedAt,
+      generatedAt: latest.analysis.createdAt || latest.run.finishedAt || latest.run.createdAt,
       report: latest.analysis.report || {},
       summary: latest.analysis.summary || "",
       numericRowCount: ensureArray(latest.analysis.numeric_rows).length,
       textRowCount: ensureArray(latest.analysis.text_rows).length,
+      hasUsableData: hasUsableData(latest.analysis),
       htmlReportUrl: `/analyst/report/html?workspaceName=${encodeURIComponent(
         workspaceName
       )}&runId=${encodeURIComponent(latest.run.runId)}`
@@ -347,10 +363,14 @@ router.get("/report/run", async (req, res) => {
       ok: true,
       workspaceName,
       runId,
+      createdAt: run.createdAt,
+      finishedAt: run.finishedAt,
+      generatedAt: analysis.createdAt || run.finishedAt || run.createdAt,
       report: analysis.report || {},
       summary: analysis.summary || "",
       numericRowCount: ensureArray(analysis.numeric_rows).length,
       textRowCount: ensureArray(analysis.text_rows).length,
+      hasUsableData: hasUsableData(analysis),
       htmlReportUrl: `/analyst/report/html?workspaceName=${encodeURIComponent(
         workspaceName
       )}&runId=${encodeURIComponent(runId)}`
@@ -385,7 +405,8 @@ router.get("/report/html", async (req, res) => {
     const html = buildReportHtml({
       workspaceName,
       runId,
-      analysis
+      analysis,
+      run
     });
 
     res.setHeader("Content-Type", "text/html; charset=utf-8");
