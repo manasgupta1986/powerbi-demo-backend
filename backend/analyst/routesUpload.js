@@ -4,6 +4,7 @@ const router = express.Router();
 const {
   createRun,
   getLatestRun,
+  getRun,
   addFileToRun,
   finishRun
 } = require("./store");
@@ -42,7 +43,8 @@ router.post("/upload/file", async (req, res) => {
       page,
       filterType,
       filterValue,
-      note
+      note,
+      dataUrl
     } = req.body || {};
 
     if (!workspaceName) {
@@ -59,6 +61,13 @@ router.post("/upload/file", async (req, res) => {
       });
     }
 
+    if (!dataUrl) {
+      return res.status(400).json({
+        ok: false,
+        error: "dataUrl is required"
+      });
+    }
+
     const run = addFileToRun({
       workspaceName,
       runId,
@@ -66,19 +75,20 @@ router.post("/upload/file", async (req, res) => {
       page,
       filterType,
       filterValue,
-      note
+      note,
+      dataUrl
     });
 
     return res.json({
       ok: true,
       runId,
       status: run.status,
-      fileCount: run.files.length
+      fileCount: run.fileCount
     });
   } catch (error) {
     return res.status(500).json({
       ok: false,
-      error: error.message || "Failed to save uploaded file metadata"
+      error: error.message || "Failed to save uploaded file"
     });
   }
 });
@@ -108,7 +118,7 @@ router.post("/upload/finish", async (req, res) => {
       runId,
       status: run.status,
       finishedAt: run.finishedAt,
-      fileCount: run.files.length
+      fileCount: run.fileCount
     });
   } catch (error) {
     return res.status(500).json({
@@ -120,9 +130,7 @@ router.post("/upload/finish", async (req, res) => {
 
 router.get("/upload/latest", async (req, res) => {
   try {
-    const workspaceName =
-      req.query.workspaceName || "default-workspace";
-
+    const workspaceName = req.query.workspaceName || "default-workspace";
     const latestRun = getLatestRun(workspaceName);
 
     return res.json({
@@ -134,6 +142,33 @@ router.get("/upload/latest", async (req, res) => {
     return res.status(500).json({
       ok: false,
       error: error.message || "Failed to fetch latest upload session"
+    });
+  }
+});
+
+router.get("/upload/run", async (req, res) => {
+  try {
+    const workspaceName = req.query.workspaceName || "default-workspace";
+    const runId = req.query.runId;
+
+    if (!runId) {
+      return res.status(400).json({
+        ok: false,
+        error: "runId is required"
+      });
+    }
+
+    const run = getRun(workspaceName, runId);
+
+    return res.json({
+      ok: true,
+      workspaceName,
+      run: run || null
+    });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: error.message || "Failed to fetch run"
     });
   }
 });
