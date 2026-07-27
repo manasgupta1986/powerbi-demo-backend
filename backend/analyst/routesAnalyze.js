@@ -39,6 +39,13 @@ router.post("/analyze/start", async (req, res) => {
       });
     }
 
+    if (!Array.isArray(run.files) || !run.files.length) {
+      return res.status(400).json({
+        ok: false,
+        error: "No uploaded screenshots found for this run"
+      });
+    }
+
     updateRunStatus({
       workspaceName,
       runId,
@@ -65,6 +72,7 @@ router.post("/analyze/start", async (req, res) => {
         } catch (innerError) {
           console.error("Failed to write failed status:", innerError);
         }
+
         console.error("Async analysis failed:", error);
       });
 
@@ -156,4 +164,3 @@ router.get("/analyze/latest", async (req, res) => {
 });
 
 module.exports = router;
-
