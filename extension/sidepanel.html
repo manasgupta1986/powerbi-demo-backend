@@ -12,10 +12,9 @@
       <div>
         <div class="eyebrow">Data Myner</div>
         <h1>Analyst Console</h1>
+        <div id="workspaceBadge" class="subtle-line">No workspace selected</div>
       </div>
-      <div class="topbar-status">
-        <span id="backendStatus" class="pill pill-muted">Backend unknown</span>
-      </div>
+      <span id="backendStatus" class="pill pill-muted">Backend unknown</span>
     </header>
 
     <section class="card">
@@ -26,40 +25,22 @@
       <div class="grid two-col">
         <label>
           <span>Backend URL</span>
-          <input
-            id="backendUrl"
-            type="url"
-            placeholder="https://powerbi-demo-backend.onrender.com"
-          />
+          <input id="backendUrl" type="url" placeholder="https://powerbi-demo-backend.onrender.com" />
         </label>
-
         <label>
           <span>Workspace name</span>
-          <input
-            id="workspaceName"
-            type="text"
-            placeholder="Amazon July Test"
-          />
+          <input id="workspaceName" type="text" placeholder="Amazon July Test" />
         </label>
       </div>
 
       <div class="grid two-col">
         <label>
           <span>Client / Project</span>
-          <input
-            id="clientName"
-            type="text"
-            placeholder="Amazon"
-          />
+          <input id="clientName" type="text" placeholder="Amazon" />
         </label>
-
         <label>
           <span>Operator</span>
-          <input
-            id="operatorName"
-            type="text"
-            placeholder="Your name"
-          />
+          <input id="operatorName" type="text" placeholder="Your name" />
         </label>
       </div>
 
@@ -70,17 +51,32 @@
     </section>
 
     <nav class="tab-nav">
-      <button class="tab-btn active" data-tab="tab-analyst">Analyst</button>
-      <button class="tab-btn" data-tab="tab-report">Summary Report</button>
-      <button class="tab-btn" data-tab="tab-chat">Chat</button>
+      <button class="tab-btn active" data-tab="tab-collect">Collect</button>
+      <button class="tab-btn" data-tab="tab-report">Report</button>
+      <button class="tab-btn" data-tab="tab-ask">Ask</button>
     </nav>
 
     <main class="tab-content">
-      <!-- ANALYST TAB -->
-      <section id="tab-analyst" class="tab-panel active">
+      <section id="tab-collect" class="tab-panel active">
         <section class="card">
           <div class="section-heading">
-            <h2>Screenshot Upload</h2>
+            <h2>Current Run</h2>
+            <span id="currentRunStatus" class="pill pill-muted">No run</span>
+          </div>
+
+          <div id="currentRunSummary" class="status-box empty-state">
+            Start a new run, add screenshots, then analyze the batch.
+          </div>
+
+          <div class="button-row action-row">
+            <button id="startNewRunBtn" class="btn btn-primary">Start New Run</button>
+            <button id="continueLatestBtn" class="btn btn-secondary">Use Latest Saved Run</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="section-heading">
+            <h2>Step 1 — Add Screenshots</h2>
             <span id="queueCount" class="muted">0 files</span>
           </div>
 
@@ -93,7 +89,6 @@
                 <option value="Purchase Funnel">Purchase Funnel</option>
               </select>
             </label>
-
             <label>
               <span>Default filter type</span>
               <select id="defaultFilterType">
@@ -106,28 +101,30 @@
             </label>
           </div>
 
-          <label>
-            <span>Select screenshots</span>
-            <input id="fileInput" type="file" accept="image/*" multiple />
-          </label>
+          <input id="fileInput" class="hidden" type="file" accept="image/*" multiple />
+
+          <div class="button-row action-row">
+            <button id="addScreenshotsBtn" class="btn btn-primary">Add Screenshots</button>
+            <button id="clearQueueBtn" class="btn btn-secondary">Clear Queue</button>
+          </div>
 
           <div class="helper-text">
-            File names like <code>Traffic engagement_zone west</code> can be auto-tagged and then edited below.
+            After adding one screenshot, either add another one or click <strong>Upload Batch</strong>.
           </div>
 
           <div id="uploadQueue" class="queue-list empty-state">
             No screenshots added yet.
           </div>
 
-          <div class="button-row">
-            <button id="clearQueueBtn" class="btn btn-secondary">Clear queue</button>
-            <button id="startUploadBtn" class="btn btn-primary">Upload screenshots</button>
+          <div class="button-row action-row sticky-cta">
+            <button id="uploadBatchBtn" class="btn btn-primary">Upload Batch</button>
+            <button id="analyzeBatchBtn" class="btn btn-secondary">Done Adding → Analyze Batch</button>
           </div>
         </section>
 
         <section class="card">
           <div class="section-heading">
-            <h2>Prompt for AI Extraction</h2>
+            <h2>Step 2 — Extraction Instructions</h2>
             <button id="togglePromptBtn" class="btn btn-ghost">Collapse</button>
           </div>
 
@@ -141,67 +138,87 @@
               <button id="resetPromptBtn" class="btn btn-secondary">Reset prompt</button>
               <button id="copyPromptBtn" class="btn btn-secondary">Copy prompt</button>
             </div>
-
-            <div class="helper-text">
-              This prompt is sent to the cloud backend when analysis starts.
-            </div>
           </div>
         </section>
 
         <section class="card">
           <div class="section-heading">
-            <h2>Analysis</h2>
+            <h2>Step 3 — Analysis Status</h2>
             <span id="analysisStatus" class="pill pill-muted">Idle</span>
-          </div>
-
-          <div class="button-row">
-            <button id="startAnalysisBtn" class="btn btn-primary">Start AI analysis</button>
-            <button id="refreshStatusBtn" class="btn btn-secondary">Refresh status</button>
           </div>
 
           <div id="analysisProgress" class="status-box empty-state">
             No analysis started yet.
           </div>
+
+          <div class="button-row action-row">
+            <button id="refreshStatusBtn" class="btn btn-secondary">Refresh Status</button>
+            <button id="retryAnalysisBtn" class="btn btn-secondary">Retry Analysis</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="section-heading">
+            <h2>Saved Runs</h2>
+            <button id="refreshHistoryBtn" class="btn btn-secondary">Refresh History</button>
+          </div>
+
+          <div class="helper-text">
+            These runs are stored on the backend, so they remain available after you close and reopen the extension.
+          </div>
+
+          <div id="historyList" class="history-list empty-state">
+            No saved runs yet.
+          </div>
         </section>
       </section>
 
-      <!-- REPORT TAB -->
       <section id="tab-report" class="tab-panel">
         <section class="card">
           <div class="section-heading">
-            <h2>Summary Report</h2>
+            <h2>Selected Report</h2>
             <span id="reportStatus" class="pill pill-muted">No report</span>
           </div>
 
-          <div class="button-row">
-            <button id="refreshReportBtn" class="btn btn-secondary">Refresh report</button>
+          <div id="reportReference" class="status-box empty-state">
+            Select a saved run or complete an analysis first.
+          </div>
+
+          <div class="button-row action-row">
+            <button id="useLatestReportBtn" class="btn btn-secondary">Use Latest Completed Run</button>
+            <button id="refreshReportBtn" class="btn btn-secondary">Refresh Report</button>
             <a
               id="openReportLink"
               class="btn btn-ghost link-btn"
               href="#"
               target="_blank"
               rel="noopener noreferrer"
-            >
-              Open full report
-            </a>
+            >Open Full Report</a>
           </div>
+        </section>
 
+        <section class="card">
           <div id="reportContainer" class="report-box empty-state">
             No report available yet.
           </div>
         </section>
       </section>
 
-      <!-- CHAT TAB -->
-      <section id="tab-chat" class="tab-panel">
+      <section id="tab-ask" class="tab-panel">
         <section class="card">
           <div class="section-heading">
-            <h2>Grounded Chat</h2>
-            <span id="chatStatus" class="pill pill-muted">Dataset only</span>
+            <h2>Chat Reference Run</h2>
+            <span id="chatStatus" class="pill pill-muted">No run selected</span>
           </div>
 
+          <div id="chatReference" class="status-box empty-state">
+            Chat will automatically use the latest completed run unless you select another saved run.
+          </div>
+        </section>
+
+        <section class="card">
           <div id="chatMessages" class="chat-box empty-state">
-            Chat will appear here after analysis is completed.
+            Chat will appear here after a usable analysis is available.
           </div>
 
           <div class="chat-compose">
@@ -210,12 +227,12 @@
               <textarea
                 id="chatInput"
                 rows="3"
-                placeholder="Ask about weekly trends, app contribution, top changes, uncertainties..."
+                placeholder="Ask about trends, top apps, low-confidence values, or differences between runs..."
               ></textarea>
             </label>
 
-            <div class="button-row">
-              <button id="clearChatBtn" class="btn btn-secondary">Clear chat</button>
+            <div class="button-row action-row">
+              <button id="clearChatBtn" class="btn btn-secondary">Clear Chat</button>
               <button id="sendChatBtn" class="btn btn-primary">Send</button>
             </div>
           </div>
