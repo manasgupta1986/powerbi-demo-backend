@@ -1,330 +1,1021 @@
-const els = {
-  clientName: document.getElementById("clientName"),
-  backendUrl: document.getElementById("backendUrl"),
-  dashboardUrl: document.getElementById("dashboardUrl"),
-  startRunBtn: document.getElementById("startRunBtn"),
-  refreshBtn: document.getElementById("refreshBtn"),
-  finishRunBtn: document.getElementById("finishRunBtn"),
-  resetBtn: document.getElementById("resetBtn"),
-  runIdText: document.getElementById("runIdText"),
-  progressText: document.getElementById("progressText"),
-  currentStepText: document.getElementById("currentStepText"),
-  nextStepText: document.getElementById("nextStepText"),
-  runStatusText: document.getElementById("runStatusText"),
-  captureBtn: document.getElementById("captureBtn"),
-  skipBtn: document.getElementById("skipBtn"),
-  progressCard: document.getElementById("progressCard"),
-  screenshotStatus: document.getElementById("screenshotStatus"),
-  uploadStatus: document.getElementById("uploadStatus"),
-  extractionStatus: document.getElementById("extractionStatus"),
-  screenshotBar: document.getElementById("screenshotBar"),
-  uploadBar: document.getElementById("uploadBar"),
-  extractionBar: document.getElementById("extractionBar"),
-  progressMessage: document.getElementById("progressMessage"),
-  postCaptureCard: document.getElementById("postCaptureCard"),
-  uploadStatusLine: document.getElementById("uploadStatusLine"),
-  extractionStatusLine: document.getElementById("extractionStatusLine"),
-  summaryAvailabilityLine: document.getElementById("summaryAvailabilityLine"),
-  postNextStepLine: document.getElementById("postNextStepLine"),
-  viewReportBtn: document.getElementById("viewReportBtn"),
-  viewLatestBtn: document.getElementById("viewLatestBtn"),
-  resultMessage: document.getElementById("resultMessage"),
-  chatQuestion: document.getElementById("chatQuestion"),
-  askBtn: document.getElementById("askBtn"),
-  chatMeta: document.getElementById("chatMeta"),
-  chatAnswer: document.getElementById("chatAnswer")
+const STORAGE_KEY = "dm_analyst_console_v1";
+const POLL_INTERVAL_MS = 3000;
+
+const DEFAULT_PROMPT = `
+Analyze these tagged dashboard screenshots.
+
+For each screenshot:
+- identify the visible numerical values
+- preserve the page and filter metadata
+- if exact values are not printed, estimate them from the axis scale, segment height, total bar height, and legend colors
+- do not guess unsupported numbers
+- note uncertainties clearly
+
+Then produce:
+1. a structured extracted dataset
+2. a concise executive summary
+3. key findings
+4. recommendations
+5. data-quality notes
+`.trim();
+
+const PAGE_OPTIONS = [
+  "Traffic Engagement",
+  "Purchase Matrix",
+  "Purchase Funnel"
+];
+
+const FILTER_OPTIONS = {
+  Zone: ["East", "North", "South", "West"],
+  NCCS: ["A", "B"],
+  Tier: ["Tier 1", "Tier 2", "Tier 3 & lower"],
+  Gender: ["Male", "Female"],
+  "Age Band": ["Below 18", "18-24", "25-35", "35-44", "45-54", "55+"]
 };
 
-let latestUiState = null;
-let pollingToken = null;
+const state = {
+  settings: {
+    backendUrl: "https://powerbi-demo-backend.onrender.com",
+    workspaceName: "default-workspace",
+    clientName: "",
+    operatorName: "",
+    defaultPage: "Traffic Engagement",
+    defaultFilterType: "Zone",
+    promptOverride: DEFAULT_PROMPT,
+    promptCollapsed: false
+  },
+  activeTab: "tab-analyst",
+  queue: [],
+  currentRunId: null,
+  uploadInProgress: false,
+  analysisInProgress: false,
+  latestStatus: null,
+  latestAnalysis: null,
+  chatMessages: []
+};
 
-init();
+const els = {};
 
-async function init() {
+document.addEventListener("DOMContentLoaded", async () => {
+  cacheDom();
   bindEvents();
-  await refreshUi();
+  await loadState();
+  applyStateToDom();
+  renderAll();
+
+  await checkBackend();
+  await refreshLatestRun();
+  await refreshLatestAnalysis();
+});
+
+function cacheDom() {
+  Object.assign(els, {
+    backendStatus: document.getElementById("backendStatus"),
+    backendUrl: document.getElementById("backendUrl"),
+    workspaceName: document.getElementById("workspaceName"),
+    clientName: document.getElementById("clientName"),
+    operatorName: document.getElementById("operatorName"),
+    saveSettingsBtn: document.getElementById("saveSettingsBtn"),
+    checkBackendBtn: document.getElementById("checkBackendBtn"),
+
+    queueCount: document.getElementById("queueCount"),
+    defaultPage: document.getElementById("defaultPage"),
+    defaultFilterType: document.getElementById("defaultFilterType"),
+    fileInput: document.getElementById("fileInput"),
+    uploadQueue: document.getElementById("uploadQueue"),
+    clearQueueBtn: document.getElementById("clearQueueBtn"),
+    startUploadBtn: document.getElementById("startUploadBtn"),
+
+    togglePromptBtn: document.getElementById("togglePromptBtn"),
+    promptArea: document.getElementById("promptArea"),
+    promptOverride: document.getElementById("promptOverride"),
+    resetPromptBtn: document.getElementById("resetPromptBtn"),
+    copyPromptBtn: document.getElementById("copyPromptBtn"),
+
+    analysisStatus: document.getElementById("analysisStatus"),
+    startAnalysisBtn: document.getElementById("startAnalysisBtn"),
+    refreshStatusBtn: document.getElementById("refreshStatusBtn"),
+    analysisProgress: document.getElementById("analysisProgress"),
+
+    reportStatus: document.getElementById("reportStatus"),
+    refreshReportBtn: document.getElementById("refreshReportBtn"),
+    openReportLink: document.getElementById("openReportLink"),
+    reportContainer: document.getElementById("reportContainer"),
+
+    chatStatus: document.getElementById("chatStatus"),
+    chatMessages: document.getElementById("chatMessages"),
+    chatInput: document.getElementById("chatInput"),
+    clearChatBtn: document.getElementById("clearChatBtn"),
+    sendChatBtn: document.getElementById("sendChatBtn")
+  });
 }
 
 function bindEvents() {
-  els.startRunBtn.addEventListener("click", onStartRun);
-  els.refreshBtn.addEventListener("click", refreshUi);
-  els.finishRunBtn.addEventListener("click", onFinishRun);
-  els.resetBtn.addEventListener("click", onReset);
-  els.captureBtn.addEventListener("click", onCapture);
-  els.skipBtn.addEventListener("click", onSkip);
-  els.askBtn.addEventListener("click", onAsk);
-}
-
-async function refreshUi() {
-  const ui = await sendMessage({ type: "GET_UI_STATE" });
-  latestUiState = ui;
-  hydrateConfig(ui?.session || {});
-  renderUi(ui);
-}
-
-async function onStartRun() {
-  clearChat();
-  clearProgress();
-  clearPostCapture();
-
-  const ui = await sendMessage({
-    type: "START_GUIDED_RUN",
-    clientName: els.clientName.value.trim(),
-    backendUrl: els.backendUrl.value.trim(),
-    dashboardUrl: els.dashboardUrl.value.trim()
+  document.querySelectorAll(".tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => setActiveTab(btn.dataset.tab));
   });
 
-  latestUiState = ui;
-  renderUi(ui);
-}
+  els.saveSettingsBtn.addEventListener("click", async () => {
+    syncSettingsFromDom();
+    await persistState();
+    notify("Settings saved");
+  });
 
-async function onFinishRun() {
-  const ui = await sendMessage({ type: "FINISH_RUN" });
-  latestUiState = ui;
-  renderUi(ui);
-}
+  els.checkBackendBtn.addEventListener("click", checkBackend);
 
-async function onReset() {
-  stopPolling();
-  const ui = await sendMessage({ type: "RESET_LOCAL_SESSION" });
-  latestUiState = ui;
-  renderUi(ui);
-  clearProgress();
-  clearPostCapture();
-  clearChat();
-}
+  els.defaultPage.addEventListener("change", async () => {
+    syncSettingsFromDom();
+    await persistState();
+  });
 
-async function onSkip() {
-  const ui = await sendMessage({ type: "SKIP_CURRENT_STEP" });
-  latestUiState = ui;
-  renderUi(ui);
-}
+  els.defaultFilterType.addEventListener("change", async () => {
+    syncSettingsFromDom();
+    await persistState();
+  });
 
-async function onCapture() {
-  try {
-    clearChat();
-    startProgressState();
+  els.fileInput.addEventListener("change", handleFilesSelected);
+  els.clearQueueBtn.addEventListener("click", clearQueue);
+  els.startUploadBtn.addEventListener("click", startUploadFlow);
 
-    const ui = await sendMessage({ type: "CAPTURE_CURRENT_STEP" });
-    latestUiState = ui;
-    renderUi(ui);
+  els.togglePromptBtn.addEventListener("click", togglePromptArea);
+  els.resetPromptBtn.addEventListener("click", resetPrompt);
+  els.copyPromptBtn.addEventListener("click", copyPrompt);
 
-    const lastCapture = ui?.lastCapture;
-    if (lastCapture?.statusUrl && ui?.session?.backendUrl) {
-      await pollStateStatus(ui.session.backendUrl, lastCapture.statusUrl, lastCapture);
+  els.startAnalysisBtn.addEventListener("click", startAnalysisFlow);
+  els.refreshStatusBtn.addEventListener("click", refreshAnalysisStatus);
+  els.refreshReportBtn.addEventListener("click", refreshLatestAnalysis);
+
+  els.sendChatBtn.addEventListener("click", sendChatMessage);
+  els.clearChatBtn.addEventListener("click", clearChat);
+
+  els.chatInput.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      sendChatMessage();
     }
-  } catch (error) {
-    setProgressMessage(`Capture failed: ${error.message || "Unknown error"}`);
-    els.screenshotStatus.textContent = "Error";
-    els.uploadStatus.textContent = "Error";
-    els.extractionStatus.textContent = "Error";
+  });
+}
+
+async function loadState() {
+  const saved = await chrome.storage.local.get([STORAGE_KEY]);
+  if (saved?.[STORAGE_KEY]) {
+    const stored = saved[STORAGE_KEY];
+
+    state.settings = {
+      ...state.settings,
+      ...(stored.settings || {})
+    };
+
+    state.activeTab = stored.activeTab || state.activeTab;
+    state.queue = Array.isArray(stored.queue) ? stored.queue : [];
+    state.currentRunId = stored.currentRunId || null;
+    state.chatMessages = Array.isArray(stored.chatMessages)
+      ? stored.chatMessages
+      : [];
   }
 }
 
-async function onAsk() {
-  try {
-    const session = latestUiState?.session || {};
-    const question = els.chatQuestion.value.trim();
-
-    if (!session.runId) {
-      els.chatMeta.textContent = "No active run yet.";
-      els.chatAnswer.textContent = "";
-      return;
+async function persistState() {
+  await chrome.storage.local.set({
+    [STORAGE_KEY]: {
+      settings: state.settings,
+      activeTab: state.activeTab,
+      queue: state.queue,
+      currentRunId: state.currentRunId,
+      chatMessages: state.chatMessages
     }
-    if (!session.backendUrl) {
-      els.chatMeta.textContent = "Backend URL is missing.";
-      els.chatAnswer.textContent = "";
-      return;
-    }
-    if (!question) {
-      els.chatMeta.textContent = "Enter a question first.";
-      els.chatAnswer.textContent = "";
-      return;
-    }
+  });
+}
 
-    els.chatMeta.textContent = "Getting answer...";
-    els.chatAnswer.textContent = "";
+function applyStateToDom() {
+  els.backendUrl.value = state.settings.backendUrl;
+  els.workspaceName.value = state.settings.workspaceName;
+  els.clientName.value = state.settings.clientName;
+  els.operatorName.value = state.settings.operatorName;
+  els.defaultPage.value = state.settings.defaultPage;
+  els.defaultFilterType.value = state.settings.defaultFilterType;
+  els.promptOverride.value = state.settings.promptOverride;
 
-    const res = await fetch(joinUrl(session.backendUrl, "/ask"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ runId: session.runId, question })
+  setActiveTab(state.activeTab, false);
+
+  if (state.settings.promptCollapsed) {
+    els.promptArea.classList.add("hidden");
+    els.togglePromptBtn.textContent = "Expand";
+  } else {
+    els.promptArea.classList.remove("hidden");
+    els.togglePromptBtn.textContent = "Collapse";
+  }
+}
+
+function syncSettingsFromDom() {
+  state.settings.backendUrl = sanitizeUrl(els.backendUrl.value);
+  state.settings.workspaceName =
+    els.workspaceName.value.trim() || "default-workspace";
+  state.settings.clientName = els.clientName.value.trim();
+  state.settings.operatorName = els.operatorName.value.trim();
+  state.settings.defaultPage = els.defaultPage.value;
+  state.settings.defaultFilterType = els.defaultFilterType.value;
+  state.settings.promptOverride =
+    els.promptOverride.value.trim() || DEFAULT_PROMPT;
+}
+
+function setActiveTab(tabId, persist = true) {
+  state.activeTab = tabId;
+
+  document.querySelectorAll(".tab-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.tab === tabId);
+  });
+
+  document.querySelectorAll(".tab-panel").forEach((panel) => {
+    panel.classList.toggle("active", panel.id === tabId);
+  });
+
+  if (persist) {
+    persistState();
+  }
+}
+
+function renderAll() {
+  renderQueue();
+  renderAnalysisStatus();
+  renderReport();
+  renderChat();
+}
+
+async function handleFilesSelected(event) {
+  const files = Array.from(event.target.files || []);
+  if (!files.length) return;
+
+  syncSettingsFromDom();
+
+  const newEntries = [];
+  for (const file of files) {
+    const dataUrl = await fileToDataUrl(file);
+    const parsed = parseFilename(file.name);
+
+    newEntries.push({
+      id: crypto.randomUUID(),
+      fileName: file.name,
+      page: parsed.page || state.settings.defaultPage,
+      filterType: parsed.filterType || state.settings.defaultFilterType,
+      filterValue: parsed.filterValue || "",
+      note: "",
+      dataUrl,
+      uploaded: false
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data?.error || "Ask request failed");
+  }
 
-    const meta = [];
-    if (data.mode) meta.push(`mode: ${data.mode}`);
-    if (data.reason) meta.push(`reason: ${data.reason}`);
-    if (data.warning) meta.push(`warning: ${data.warning}`);
-    els.chatMeta.textContent = meta.length ? meta.join(" | ") : "Answer ready";
-    els.chatAnswer.textContent = data.answer || "No answer returned.";
+  state.queue.unshift(...newEntries);
+  els.fileInput.value = "";
+
+  await persistState();
+  renderQueue();
+  notify(`${newEntries.length} file(s) added`);
+}
+
+function parseFilename(fileName) {
+  const lower = String(fileName || "").toLowerCase();
+
+  let page = "";
+  if (lower.includes("traffic") && lower.includes("engagement")) {
+    page = "Traffic Engagement";
+  } else if (lower.includes("purchase") && lower.includes("matrix")) {
+    page = "Purchase Matrix";
+  } else if (lower.includes("purchase") && lower.includes("funnel")) {
+    page = "Purchase Funnel";
+  }
+
+  let filterType = "";
+  if (lower.includes("zone")) filterType = "Zone";
+  else if (lower.includes("nccs")) filterType = "NCCS";
+  else if (lower.includes("tier")) filterType = "Tier";
+  else if (lower.includes("gender")) filterType = "Gender";
+  else if (lower.includes("age")) filterType = "Age Band";
+
+  let filterValue = "";
+  if (filterType === "Zone") {
+    if (lower.includes("east")) filterValue = "East";
+    if (lower.includes("west")) filterValue = "West";
+    if (lower.includes("north")) filterValue = "North";
+    if (lower.includes("south")) filterValue = "South";
+  } else if (filterType === "NCCS") {
+    if (lower.includes("nccs a") || lower.includes("_a")) filterValue = "A";
+    if (lower.includes("nccs b") || lower.includes("_b")) filterValue = "B";
+  } else if (filterType === "Tier") {
+    if (lower.includes("tier 1") || lower.includes("tier1")) {
+      filterValue = "Tier 1";
+    } else if (lower.includes("tier 2") || lower.includes("tier2")) {
+      filterValue = "Tier 2";
+    } else if (
+      lower.includes("tier 3") ||
+      lower.includes("tier3") ||
+      lower.includes("lower")
+    ) {
+      filterValue = "Tier 3 & lower";
+    }
+  } else if (filterType === "Gender") {
+    if (lower.includes("female")) filterValue = "Female";
+    else if (lower.includes("male")) filterValue = "Male";
+  } else if (filterType === "Age Band") {
+    if (lower.includes("below 18")) filterValue = "Below 18";
+    else if (lower.includes("18-24")) filterValue = "18-24";
+    else if (lower.includes("25-35")) filterValue = "25-35";
+    else if (lower.includes("35-44")) filterValue = "35-44";
+    else if (lower.includes("45-54")) filterValue = "45-54";
+    else if (lower.includes("55+")) filterValue = "55+";
+    else if (lower.includes("55 plus")) filterValue = "55+";
+  }
+
+  return { page, filterType, filterValue };
+}
+
+function renderQueue() {
+  els.queueCount.textContent = `${state.queue.length} file${
+    state.queue.length === 1 ? "" : "s"
+  }`;
+
+  if (!state.queue.length) {
+    els.uploadQueue.innerHTML = "No screenshots added yet.";
+    els.uploadQueue.classList.add("empty-state");
+    return;
+  }
+
+  els.uploadQueue.classList.remove("empty-state");
+  els.uploadQueue.innerHTML = "";
+
+  state.queue.forEach((item) => {
+    const wrapper = document.createElement("div");
+    wrapper.className = "queue-item";
+
+    const filterValues = FILTER_OPTIONS[item.filterType] || [];
+
+    wrapper.innerHTML = `
+      <div class="queue-top">
+        <div>
+          <div class="queue-name">${escapeHtml(item.fileName)}</div>
+          <div class="queue-subtext">
+            ${item.uploaded ? "Uploaded" : "Pending upload"}
+          </div>
+        </div>
+        <button class="btn btn-ghost" data-remove-id="${item.id}">Remove</button>
+      </div>
+
+      <div class="queue-grid">
+        <label>
+          <span>Page</span>
+          <select data-field="page" data-id="${item.id}">
+            ${PAGE_OPTIONS.map((opt) => {
+              return `<option value="${escapeAttr(opt)}" ${
+                item.page === opt ? "selected" : ""
+              }>${escapeHtml(opt)}</option>`;
+            }).join("")}
+          </select>
+        </label>
+
+        <label>
+          <span>Filter type</span>
+          <select data-field="filterType" data-id="${item.id}">
+            ${Object.keys(FILTER_OPTIONS).map((opt) => {
+              return `<option value="${escapeAttr(opt)}" ${
+                item.filterType === opt ? "selected" : ""
+              }>${escapeHtml(opt)}</option>`;
+            }).join("")}
+          </select>
+        </label>
+
+        <label>
+          <span>Filter value</span>
+          <input
+            type="text"
+            value="${escapeAttr(item.filterValue || "")}"
+            data-field="filterValue"
+            data-id="${item.id}"
+            list="filter-values-${item.id}"
+          />
+          <datalist id="filter-values-${item.id}">
+            ${filterValues.map((value) => {
+              return `<option value="${escapeAttr(value)}"></option>`;
+            }).join("")}
+          </datalist>
+        </label>
+      </div>
+
+      <div class="queue-note">
+        <label>
+          <span>Note</span>
+          <textarea rows="2" data-field="note" data-id="${item.id}">${escapeHtml(
+            item.note || ""
+          )}</textarea>
+        </label>
+      </div>
+
+      <img class="preview-img" src="${item.dataUrl}" alt="${escapeAttr(
+      item.fileName
+    )}" />
+    `;
+
+    els.uploadQueue.appendChild(wrapper);
+  });
+
+  els.uploadQueue.querySelectorAll("[data-remove-id]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      state.queue = state.queue.filter((item) => item.id !== btn.dataset.removeId);
+      await persistState();
+      renderQueue();
+    });
+  });
+
+  els.uploadQueue.querySelectorAll("[data-field]").forEach((field) => {
+    field.addEventListener("input", handleQueueEdit);
+    field.addEventListener("change", handleQueueEdit);
+  });
+}
+
+async function handleQueueEdit(event) {
+  const id = event.target.dataset.id;
+  const field = event.target.dataset.field;
+
+  const item = state.queue.find((entry) => entry.id === id);
+  if (!item) return;
+
+  item[field] = event.target.value;
+
+  if (field === "filterType") {
+    const valid = FILTER_OPTIONS[item.filterType] || [];
+    if (!valid.includes(item.filterValue)) {
+      item.filterValue = "";
+      renderQueue();
+    }
+  }
+
+  await persistState();
+}
+
+async function clearQueue() {
+  state.queue = [];
+  await persistState();
+  renderQueue();
+}
+
+function togglePromptArea() {
+  state.settings.promptCollapsed = !state.settings.promptCollapsed;
+
+  if (state.settings.promptCollapsed) {
+    els.promptArea.classList.add("hidden");
+    els.togglePromptBtn.textContent = "Expand";
+  } else {
+    els.promptArea.classList.remove("hidden");
+    els.togglePromptBtn.textContent = "Collapse";
+  }
+
+  persistState();
+}
+
+async function resetPrompt() {
+  state.settings.promptOverride = DEFAULT_PROMPT;
+  els.promptOverride.value = DEFAULT_PROMPT;
+  await persistState();
+  notify("Prompt reset");
+}
+
+async function copyPrompt() {
+  try {
+    await navigator.clipboard.writeText(els.promptOverride.value);
+    notify("Prompt copied");
   } catch (error) {
-    els.chatMeta.textContent = `Ask failed: ${error.message || "Unknown error"}`;
-    els.chatAnswer.textContent = "";
+    notify("Could not copy prompt");
   }
 }
 
-function hydrateConfig(session) {
-  els.clientName.value = session.clientName || "";
-  els.backendUrl.value = session.backendUrl || "";
-  els.dashboardUrl.value = session.dashboardUrl || "";
-}
+async function checkBackend() {
+  syncSettingsFromDom();
+  setPill(els.backendStatus, "Checking...", "warning");
 
-function renderUi(ui) {
-  const session = ui?.session || {};
-  const currentStep = ui?.currentStep || null;
-  const nextStep = ui?.nextStep || null;
-
-  els.runIdText.textContent = session.runId || "--";
-  els.progressText.textContent = `${ui?.completedSteps || 0} / ${ui?.totalSteps || 0}`;
-  els.currentStepText.textContent = currentStep ? formatStep(currentStep) : "--";
-  els.nextStepText.textContent = nextStep ? formatStep(nextStep) : "Run complete";
-  els.runStatusText.textContent = session.status || "idle";
-
-  if (ui?.lastCapture) showPostCapture(session, ui.lastCapture, nextStep);
-  else clearPostCapture();
-
-  const locked = session.status === "completed";
-  els.captureBtn.disabled = locked;
-  els.skipBtn.disabled = locked;
-}
-
-function showPostCapture(session, lastCapture, nextStep) {
-  els.postCaptureCard.classList.remove("hidden");
-  els.uploadStatusLine.textContent = "Completed";
-  els.extractionStatusLine.textContent = capitalize(lastCapture.status || "queued");
-  els.summaryAvailabilityLine.textContent = lastCapture.summaryAvailable ? "Available" : "Pending";
-  els.postNextStepLine.textContent = nextStep ? formatStep(nextStep) : "Run complete";
-  els.resultMessage.textContent = lastCapture.message || "Capture uploaded successfully.";
-
-  if (lastCapture.reportUrl && session.backendUrl) {
-    els.viewReportBtn.href = joinUrl(session.backendUrl, lastCapture.reportUrl);
-    els.viewReportBtn.classList.remove("hidden");
-  } else {
-    els.viewReportBtn.classList.add("hidden");
-  }
-
-  if (lastCapture.latestDataUrl && session.backendUrl) {
-    els.viewLatestBtn.href = joinUrl(session.backendUrl, lastCapture.latestDataUrl);
-    els.viewLatestBtn.classList.remove("hidden");
-  } else {
-    els.viewLatestBtn.classList.add("hidden");
+  try {
+    const payload = await api("/health", { method: "GET" });
+    if (payload?.ok === true || payload) {
+      setPill(els.backendStatus, "Backend ready", "success");
+    } else {
+      setPill(els.backendStatus, "Backend issue", "danger");
+    }
+  } catch (error) {
+    setPill(els.backendStatus, "Backend offline", "danger");
   }
 }
 
-function startProgressState() {
-  stopPolling();
-  els.progressCard.classList.remove("hidden");
-  els.screenshotStatus.textContent = "In progress";
-  els.uploadStatus.textContent = "Waiting";
-  els.extractionStatus.textContent = "Waiting";
-  setBar(els.screenshotBar, 35);
-  setBar(els.uploadBar, 0);
-  setBar(els.extractionBar, 0);
-  setProgressMessage("Capturing screenshot...");
+async function startUploadFlow() {
+  if (state.uploadInProgress) return;
+
+  syncSettingsFromDom();
+
+  if (!state.queue.length) {
+    notify("Add screenshots first");
+    return;
+  }
+
+  state.uploadInProgress = true;
+  setBusy(els.startUploadBtn, true, "Uploading...");
+
+  try {
+    const startRes = await api("/analyst/upload/start", {
+      method: "POST",
+      body: JSON.stringify({
+        workspaceName: state.settings.workspaceName,
+        clientName: state.settings.clientName,
+        operatorName: state.settings.operatorName
+      })
+    });
+
+    const runId = startRes.runId;
+    state.currentRunId = runId;
+    await persistState();
+
+    let uploadedCount = 0;
+
+    for (const item of state.queue) {
+      if (item.uploaded) {
+        uploadedCount += 1;
+        continue;
+      }
+
+      await api("/analyst/upload/file", {
+        method: "POST",
+        body: JSON.stringify({
+          workspaceName: state.settings.workspaceName,
+          runId,
+          fileName: item.fileName,
+          page: item.page,
+          filterType: item.filterType,
+          filterValue: item.filterValue,
+          note: item.note,
+          dataUrl: item.dataUrl
+        })
+      });
+
+      item.uploaded = true;
+      uploadedCount += 1;
+      await persistState();
+      renderQueue();
+
+      els.analysisProgress.innerHTML = `
+        <div><strong>Upload in progress</strong></div>
+        <div class="muted">Run ID: ${escapeHtml(runId)}</div>
+        <div class="muted">Uploaded ${uploadedCount} of ${state.queue.length} file(s)</div>
+      `;
+    }
+
+    const finishRes = await api("/analyst/upload/finish", {
+      method: "POST",
+      body: JSON.stringify({
+        workspaceName: state.settings.workspaceName,
+        runId
+      })
+    });
+
+    els.analysisProgress.innerHTML = `
+      <div><strong>Upload completed</strong></div>
+      <div class="muted">Run ID: ${escapeHtml(runId)}</div>
+      <div class="muted">Status: ${escapeHtml(finishRes.status || "upload_complete")}</div>
+      <div class="muted">Files: ${escapeHtml(String(finishRes.fileCount || state.queue.length))}</div>
+    `;
+
+    setPill(els.analysisStatus, "Upload complete", "success");
+    notify("Upload completed");
+  } catch (error) {
+    setPill(els.analysisStatus, "Upload failed", "danger");
+    els.analysisProgress.innerHTML = `
+      <div><strong>Upload failed</strong></div>
+      <div class="muted">${escapeHtml(error.message || "Unknown error")}</div>
+    `;
+    notify(error.message || "Upload failed");
+  } finally {
+    state.uploadInProgress = false;
+    setBusy(els.startUploadBtn, false, "Upload screenshots");
+  }
 }
 
-function clearProgress() {
-  els.progressCard.classList.add("hidden");
-  setBar(els.screenshotBar, 0);
-  setBar(els.uploadBar, 0);
-  setBar(els.extractionBar, 0);
+async function refreshLatestRun() {
+  try {
+    syncSettingsFromDom();
+
+    const payload = await api(
+      `/analyst/upload/latest?workspaceName=${encodeURIComponent(
+        state.settings.workspaceName
+      )}`,
+      { method: "GET" }
+    );
+
+    const latestRun = payload?.latestRun || null;
+    if (latestRun?.runId) {
+      state.currentRunId = latestRun.runId;
+      await persistState();
+    }
+  } catch (error) {
+    // silently ignore
+  }
 }
 
-function clearPostCapture() {
-  els.postCaptureCard.classList.add("hidden");
-  els.viewReportBtn.classList.add("hidden");
-  els.viewLatestBtn.classList.add("hidden");
+async function startAnalysisFlow() {
+  if (state.analysisInProgress) return;
+
+  syncSettingsFromDom();
+
+  if (!state.currentRunId) {
+    notify("Upload screenshots first");
+    return;
+  }
+
+  state.analysisInProgress = true;
+  setBusy(els.startAnalysisBtn, true, "Starting...");
+  setPill(els.analysisStatus, "Queued", "warning");
+
+  try {
+    const payload = await api("/analyst/analyze/start", {
+      method: "POST",
+      body: JSON.stringify({
+        workspaceName: state.settings.workspaceName,
+        runId: state.currentRunId,
+        promptOverride: state.settings.promptOverride
+      })
+    });
+
+    els.analysisProgress.innerHTML = `
+      <div><strong>Analysis started</strong></div>
+      <div class="muted">Run ID: ${escapeHtml(payload.runId || state.currentRunId)}</div>
+      <div class="muted">Status: ${escapeHtml(payload.status || "queued")}</div>
+    `;
+
+    notify("AI analysis started");
+    await pollAnalysisStatus();
+  } catch (error) {
+    setPill(els.analysisStatus, "Failed", "danger");
+    els.analysisProgress.innerHTML = `
+      <div><strong>Could not start analysis</strong></div>
+      <div class="muted">${escapeHtml(error.message || "Unknown error")}</div>
+    `;
+    notify(error.message || "Could not start analysis");
+  } finally {
+    state.analysisInProgress = false;
+    setBusy(els.startAnalysisBtn, false, "Start AI analysis");
+  }
 }
 
-async function pollStateStatus(backendUrl, statusUrl, lastCapture) {
-  stopPolling();
-  const token = `${backendUrl}|${statusUrl}|${Date.now()}`;
-  pollingToken = token;
+async function refreshAnalysisStatus() {
+  if (!state.currentRunId) {
+    notify("No run available yet");
+    return;
+  }
 
-  els.screenshotStatus.textContent = "Completed";
-  setBar(els.screenshotBar, 100);
-  els.uploadStatus.textContent = "Completed";
-  setBar(els.uploadBar, 100);
-  els.extractionStatus.textContent = "Queued";
-  setBar(els.extractionBar, 10);
-  setProgressMessage("Upload complete. Waiting for extraction...");
+  try {
+    const payload = await api(
+      `/analyst/analyze/status?workspaceName=${encodeURIComponent(
+        state.settings.workspaceName
+      )}&runId=${encodeURIComponent(state.currentRunId)}`,
+      { method: "GET" }
+    );
 
-  for (let i = 0; i < 120; i++) {
-    if (pollingToken !== token) return;
+    state.latestStatus = payload;
+    renderAnalysisStatus();
+
+    if (payload?.analysis) {
+      state.latestAnalysis = payload.analysis;
+      renderReport();
+    }
+  } catch (error) {
+    els.analysisProgress.innerHTML = `
+      <div><strong>Status refresh failed</strong></div>
+      <div class="muted">${escapeHtml(error.message || "Unknown error")}</div>
+    `;
+  }
+}
+
+async function pollAnalysisStatus() {
+  if (!state.currentRunId) return;
+
+  let keepPolling = true;
+
+  while (keepPolling) {
     try {
-      const res = await fetch(joinUrl(backendUrl, statusUrl));
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Polling failed");
+      const payload = await api(
+        `/analyst/analyze/status?workspaceName=${encodeURIComponent(
+          state.settings.workspaceName
+        )}&runId=${encodeURIComponent(state.currentRunId)}`,
+        { method: "GET" }
+      );
 
-      const status = data.status || "unknown";
-      els.extractionStatus.textContent = capitalize(status);
+      state.latestStatus = payload;
+      renderAnalysisStatus();
 
-      if (status === "queued") {
-        setBar(els.extractionBar, 20);
-        setProgressMessage("Extraction queued...");
-      } else if (status === "running") {
-        setBar(els.extractionBar, 65);
-        setProgressMessage("AI extraction running...");
-      } else if (status === "completed") {
-        setBar(els.extractionBar, 100);
-        setProgressMessage(`Extraction complete. Numeric rows: ${data.numericRowCount || 0}`);
-        latestUiState.lastCapture = {
-          ...lastCapture,
-          status,
-          summaryAvailable: Boolean(data.summaryAvailable),
-          numericRowCount: data.numericRowCount || 0,
-          summary: data.summary || "",
-          message: data.numericRowCount > 0
-            ? `Extraction complete. Numeric rows found: ${data.numericRowCount}.`
-            : "Extraction complete. No numeric rows found; summary fallback may still be available."
-        };
-        renderUi(latestUiState);
-        stopPolling();
-        return;
-      } else if (status === "failed") {
-        setBar(els.extractionBar, 100);
-        setProgressMessage(`Extraction failed: ${data.error || "Unknown error"}`);
-        latestUiState.lastCapture = {
-          ...lastCapture,
-          status,
-          summaryAvailable: false,
-          message: `Extraction failed: ${data.error || "Unknown error"}`
-        };
-        renderUi(latestUiState);
-        stopPolling();
-        return;
+      const status = payload?.status || "";
+
+      if (status === "completed" || status === "failed") {
+        keepPolling = false;
+        if (payload?.analysis) {
+          state.latestAnalysis = payload.analysis;
+        }
+        await refreshLatestAnalysis();
+        renderReport();
+        break;
       }
     } catch (error) {
-      setProgressMessage(`Status polling error: ${error.message || "Unknown error"}`);
+      keepPolling = false;
+      els.analysisProgress.innerHTML = `
+        <div><strong>Polling failed</strong></div>
+        <div class="muted">${escapeHtml(error.message || "Unknown error")}</div>
+      `;
+      break;
     }
-    await sleep(2000);
+
+    await delay(POLL_INTERVAL_MS);
+  }
+}
+
+function renderAnalysisStatus() {
+  const payload = state.latestStatus;
+
+  if (!payload) {
+    setPill(els.analysisStatus, "Idle", "muted");
+    if (!state.currentRunId) {
+      els.analysisProgress.innerHTML = "No analysis started yet.";
+      els.analysisProgress.classList.add("empty-state");
+    }
+    return;
   }
 
-  setProgressMessage("Extraction is taking longer than expected. You can still open the report or latest data links.");
+  els.analysisProgress.classList.remove("empty-state");
+
+  const status = payload.status || "unknown";
+  const pillTone =
+    status === "completed"
+      ? "success"
+      : status === "failed"
+      ? "danger"
+      : "warning";
+
+  setPill(els.analysisStatus, capitalize(status), pillTone);
+
+  els.analysisProgress.innerHTML = `
+    <div><strong>Current analysis status</strong></div>
+    <div class="muted">Run ID: ${escapeHtml(payload.runId || state.currentRunId || "")}</div>
+    <div class="muted">Status: ${escapeHtml(status)}</div>
+    <div class="muted">Numeric rows: ${escapeHtml(
+      String(payload.numericRowCount || 0)
+    )}</div>
+    <div class="muted">Text rows: ${escapeHtml(
+      String(payload.textRowCount || 0)
+    )}</div>
+    <div class="muted">Summary ready: ${payload.hasSummary ? "Yes" : "No"}</div>
+    <div class="muted">Report ready: ${payload.hasReport ? "Yes" : "No"}</div>
+    ${
+      payload.error
+        ? `<div class="muted" style="color:#ffb6b6;">Error: ${escapeHtml(
+            payload.error
+          )}</div>`
+        : ""
+    }
+  `;
 }
 
-function clearChat() {
-  els.chatMeta.textContent = "No answer yet.";
-  els.chatAnswer.textContent = "";
+async function refreshLatestAnalysis() {
+  try {
+    syncSettingsFromDom();
+
+    const payload = await api(
+      `/analyst/analyze/latest?workspaceName=${encodeURIComponent(
+        state.settings.workspaceName
+      )}`,
+      { method: "GET" }
+    );
+
+    state.latestAnalysis = payload?.latest?.analysis || null;
+    renderReport();
+  } catch (error) {
+    renderReport();
+  }
 }
 
-function setProgressMessage(text) { els.progressMessage.textContent = text; }
-function setBar(el, percent) { el.style.width = `${Math.max(0, Math.min(100, percent))}%`; }
-function stopPolling() { pollingToken = null; }
-function formatStep(step) { return `${step.pageName} > ${step.filterName} > ${step.filterValue}`; }
-function capitalize(v) { const s = String(v || ""); return s ? s[0].toUpperCase() + s.slice(1) : s; }
-function joinUrl(base, p) { if (!p) return base; if (/^https?:\/\//i.test(p)) return p; return `${String(base).replace(/\/+$/, "")}/${String(p).replace(/^\/+/, "")}`; }
-function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+function renderReport() {
+  const analysis = state.latestAnalysis;
 
-function sendMessage(message) {
-  return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage(message, (response) => {
-      const err = chrome.runtime.lastError;
-      if (err) return reject(new Error(err.message));
-      if (response?.ok === false && response?.error) return reject(new Error(response.error));
-      resolve(response);
+  if (!analysis || !analysis.report) {
+    setPill(els.reportStatus, "No report", "muted");
+    els.reportContainer.innerHTML = "No report available yet.";
+    els.reportContainer.classList.add("empty-state");
+    els.openReportLink.href = "#";
+    return;
+  }
+
+  const report = analysis.report;
+  els.reportContainer.classList.remove("empty-state");
+  setPill(els.reportStatus, "Ready", "success");
+
+  els.reportContainer.innerHTML = `
+    <div class="report-section">
+      <h3>${escapeHtml(report.title || "Summary Report")}</h3>
+      ${
+        analysis.summary
+          ? `<div class="report-summary">${escapeHtml(analysis.summary)}</div>`
+          : ""
+      }
+    </div>
+
+    ${renderListSection("Executive Summary", report.executive_summary)}
+    ${renderListSection("Key Findings", report.key_findings)}
+    ${renderListSection("Recommendations", report.recommendations)}
+    ${renderListSection("Data Quality Notes", report.data_quality_notes)}
+  `;
+
+  els.openReportLink.href = "#";
+}
+
+function renderListSection(title, items) {
+  const safeItems = Array.isArray(items) ? items : [];
+  if (!safeItems.length) return "";
+
+  return `
+    <div class="report-section">
+      <h3>${escapeHtml(title)}</h3>
+      <ul>
+        ${safeItems
+          .map((item) => `<li>${escapeHtml(String(item))}</li>`)
+          .join("")}
+      </ul>
+    </div>
+  `;
+}
+
+async function sendChatMessage() {
+  const question = els.chatInput.value.trim();
+  if (!question) return;
+
+  appendChatMessage("user", question);
+  els.chatInput.value = "";
+  setBusy(els.sendChatBtn, true, "Sending...");
+
+  try {
+    syncSettingsFromDom();
+
+    const payload = await api("/analyst/chat", {
+      method: "POST",
+      body: JSON.stringify({
+        workspaceName: state.settings.workspaceName,
+        runId: state.currentRunId,
+        messages: state.chatMessages,
+        userQuestion: question
+      })
     });
+
+    const answer =
+      payload?.answer ||
+      payload?.message ||
+      "No response returned from the backend.";
+
+    appendChatMessage("assistant", answer);
+    setPill(els.chatStatus, "Connected", "success");
+  } catch (error) {
+    let message = error.message || "Chat failed";
+
+    if (
+      message.includes("404") ||
+      message.toLowerCase().includes("cannot post") ||
+      message.toLowerCase().includes("not found")
+    ) {
+      message =
+        "Chat endpoint is not live yet. The UI is ready, but backend /analyst/chat still needs to be added.";
+    }
+
+    appendChatMessage("assistant", message);
+    setPill(els.chatStatus, "Unavailable", "warning");
+  } finally {
+    setBusy(els.sendChatBtn, false, "Send");
+  }
+}
+
+function appendChatMessage(role, content) {
+  state.chatMessages.push({
+    role,
+    content,
+    createdAt: new Date().toISOString()
   });
+
+  persistState();
+  renderChat();
+}
+
+async function clearChat() {
+  state.chatMessages = [];
+  await persistState();
+  renderChat();
+}
+
+function renderChat() {
+  if (!state.chatMessages.length) {
+    els.chatMessages.innerHTML =
+      "Chat will appear here after analysis is completed.";
+    els.chatMessages.classList.add("empty-state");
+    return;
+  }
+
+  els.chatMessages.classList.remove("empty-state");
+  els.chatMessages.innerHTML = "";
+
+  state.chatMessages.forEach((message) => {
+    const div = document.createElement("div");
+    div.className = `chat-message ${message.role}`;
+    div.textContent = message.content;
+    els.chatMessages.appendChild(div);
+  });
+
+  els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+}
+
+async function api(path, options = {}) {
+  const baseUrl = sanitizeUrl(
+    state.settings.backendUrl || els.backendUrl.value || ""
+  );
+
+  if (!baseUrl) {
+    throw new Error("Backend URL is required");
+  }
+
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: options.method || "GET",
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers || {})
+    },
+    body: options.body || undefined
+  });
+
+  const text = await response.text();
+
+  let payload = {};
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch (error) {
+    payload = { raw: text };
+  }
+
+  if (!response.ok) {
+    const message =
+      payload?.error ||
+      payload?.message ||
+      payload?.raw ||
+      `Request failed (${response.status})`;
+    throw new Error(message);
+  }
+
+  return payload;
+}
+
+function setPill(el, text, tone = "muted") {
+  el.textContent = text;
+  el.className = `pill pill-${tone}`;
+}
+
+function setBusy(button, busy, busyLabel) {
+  if (!button.dataset.defaultLabel) {
+    button.dataset.defaultLabel = button.textContent;
+  }
+
+  button.disabled = busy;
+  button.textContent = busy ? busyLabel : button.dataset.defaultLabel;
+}
+
+function sanitizeUrl(value) {
+  return String(value || "").trim().replace(/\/+$/, "");
+}
+
+function capitalize(value) {
+  if (!value) return "";
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value).replace(/`/g, "&#96;");
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function notify(message) {
+  console.log("[Data Myner Analyst Console]", message);
 }
