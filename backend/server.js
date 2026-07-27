@@ -299,6 +299,8 @@ app.post("/ask", async (req, res) => {
 
 app.use("/analyst", analystUploadRoutes);
 
+app.use("/analyst", analystAnalyzeRoutes);
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
