@@ -7,8 +7,6 @@ const path = require("path");
 const analystAnalyzeRoutes = require("./analyst/routesAnalyze");
 const analystChatRoutes = require("./analyst/routesChat");
 const analystReportRoutes = require("./analyst/routesReport");
-const analystReportRoutes = require("./analyst/routesReport");
-const analystChatRoutes = require("./analyst/routesChat");
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -305,8 +303,6 @@ app.use("/analyst", analystUploadRoutes);
 app.use("/analyst", analystAnalyzeRoutes);
 app.use("/analyst", analystChatRoutes);
 app.use("/analyst", analystReportRoutes);
-app.use("/analyst", analystReportRoutes);
-app.use("/analyst", analystChatRoutes);
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
