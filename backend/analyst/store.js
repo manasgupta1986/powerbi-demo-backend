@@ -1,8 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const DATA_DIR =
-  process.env.DATA_DIR || path.join(__dirname, "..", "data");
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "..", "data");
 
 function ensureDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true });
@@ -12,7 +11,7 @@ function readJson(filePath, fallback) {
   try {
     if (!fs.existsSync(filePath)) return fallback;
     return JSON.parse(fs.readFileSync(filePath, "utf8"));
-  } catch (error) {
+  } catch {
     return fallback;
   }
 }
@@ -42,11 +41,9 @@ function getWorkspaceParts(workspaceName) {
   const workspaceDir = path.join(DATA_DIR, "analyst", workspaceKey);
   const uploadsDir = path.join(workspaceDir, "uploads");
   const analysisDir = path.join(workspaceDir, "analysis");
-
   ensureDir(workspaceDir);
   ensureDir(uploadsDir);
   ensureDir(analysisDir);
-
   return { workspaceKey, workspaceDir, uploadsDir, analysisDir };
 }
 
@@ -63,7 +60,6 @@ function getAnalysisFile(workspaceName, runId) {
 function createRun({ workspaceName, clientName = "", operatorName = "" }) {
   const runsFile = getRunsFile(workspaceName);
   const runs = readJson(runsFile, []);
-
   const run = {
     runId: `run_${Date.now()}`,
     workspaceName: workspaceName || "default-workspace",
@@ -79,33 +75,26 @@ function createRun({ workspaceName, clientName = "", operatorName = "" }) {
     hasUsableData: false,
     files: []
   };
-
   runs.unshift(run);
   writeJson(runsFile, runs);
   return run;
 }
 
 function listRuns(workspaceName, limit = 20) {
-  const runsFile = getRunsFile(workspaceName);
-  const runs = readJson(runsFile, []);
-  return runs.slice(0, limit);
+  return readJson(getRunsFile(workspaceName), []).slice(0, limit);
 }
 
 function getLatestRun(workspaceName) {
-  const runs = listRuns(workspaceName, 1);
-  return runs.length ? runs[0] : null;
+  return listRuns(workspaceName, 1)[0] || null;
 }
 
 function getRun(workspaceName, runId) {
-  const runsFile = getRunsFile(workspaceName);
-  const runs = readJson(runsFile, []);
-  return runs.find((run) => run.runId === runId) || null;
+  return readJson(getRunsFile(workspaceName), []).find((run) => run.runId === runId) || null;
 }
 
 function getExtensionFromDataUrl(dataUrl) {
   const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,/.exec(dataUrl || "");
   const mime = match ? match[1] : "image/png";
-
   if (mime === "image/jpeg") return ".jpg";
   if (mime === "image/webp") return ".webp";
   if (mime === "image/gif") return ".gif";
@@ -116,47 +105,22 @@ function saveBase64Image({ workspaceName, runId, fileName, dataUrl }) {
   if (!dataUrl || typeof dataUrl !== "string" || !dataUrl.startsWith("data:image/")) {
     throw new Error("Invalid image dataUrl");
   }
-
   const { uploadsDir } = getWorkspaceParts(workspaceName);
   const ext = getExtensionFromDataUrl(dataUrl);
   const baseName = safeFilePart(path.parse(fileName || "upload").name);
   const storedFileName = `${runId}_${Date.now()}_${baseName}${ext}`;
   const filePath = path.join(uploadsDir, storedFileName);
-
   const base64 = dataUrl.split(",")[1];
   fs.writeFileSync(filePath, Buffer.from(base64, "base64"));
-
-  return {
-    storedFileName,
-    filePath
-  };
+  return { storedFileName, filePath };
 }
 
-function addFileToRun({
-  workspaceName,
-  runId,
-  fileName,
-  page,
-  filterType,
-  filterValue,
-  note,
-  dataUrl
-}) {
+function addFileToRun({ workspaceName, runId, fileName, page, filterType, filterValue, note, dataUrl }) {
   const runsFile = getRunsFile(workspaceName);
   const runs = readJson(runsFile, []);
   const idx = runs.findIndex((run) => run.runId === runId);
-
-  if (idx === -1) {
-    throw new Error("Run not found");
-  }
-
-  const savedImage = saveBase64Image({
-    workspaceName,
-    runId,
-    fileName,
-    dataUrl
-  });
-
+  if (idx === -1) throw new Error("Run not found");
+  const savedImage = saveBase64Image({ workspaceName, runId, fileName, dataUrl });
   runs[idx].files.push({
     fileName: fileName || "",
     storedFileName: savedImage.storedFileName,
@@ -167,9 +131,7 @@ function addFileToRun({
     note: note || "",
     uploadedAt: new Date().toISOString()
   });
-
   runs[idx].fileCount = runs[idx].files.length;
-
   writeJson(runsFile, runs);
   return runs[idx];
 }
@@ -178,15 +140,10 @@ function finishRun({ workspaceName, runId }) {
   const runsFile = getRunsFile(workspaceName);
   const runs = readJson(runsFile, []);
   const idx = runs.findIndex((run) => run.runId === runId);
-
-  if (idx === -1) {
-    throw new Error("Run not found");
-  }
-
+  if (idx === -1) throw new Error("Run not found");
   runs[idx].status = "upload_complete";
   runs[idx].finishedAt = new Date().toISOString();
   runs[idx].error = null;
-
   writeJson(runsFile, runs);
   return runs[idx];
 }
@@ -195,18 +152,10 @@ function updateRunStatus({ workspaceName, runId, status, error = null }) {
   const runsFile = getRunsFile(workspaceName);
   const runs = readJson(runsFile, []);
   const idx = runs.findIndex((run) => run.runId === runId);
-
-  if (idx === -1) {
-    throw new Error("Run not found");
-  }
-
+  if (idx === -1) throw new Error("Run not found");
   runs[idx].status = status;
   runs[idx].error = error;
-
-  if (status === "completed" || status === "failed") {
-    runs[idx].finishedAt = new Date().toISOString();
-  }
-
+  if (status === "completed" || status === "failed") runs[idx].finishedAt = new Date().toISOString();
   writeJson(runsFile, runs);
   return runs[idx];
 }
@@ -215,55 +164,37 @@ function computeUsability(analysis) {
   const numericRows = Array.isArray(analysis.numeric_rows) ? analysis.numeric_rows.length : 0;
   const textRows = Array.isArray(analysis.text_rows) ? analysis.text_rows.length : 0;
   const summary = typeof analysis.summary === "string" ? analysis.summary.trim() : "";
-
   return numericRows > 0 || textRows > 0 || summary.length > 0;
 }
 
 function saveAnalysis({ workspaceName, runId, analysis }) {
-  const analysisFile = getAnalysisFile(workspaceName, runId);
-  writeJson(analysisFile, analysis);
-
+  writeJson(getAnalysisFile(workspaceName, runId), analysis);
   const runsFile = getRunsFile(workspaceName);
   const runs = readJson(runsFile, []);
   const idx = runs.findIndex((run) => run.runId === runId);
-
   if (idx !== -1) {
     runs[idx].status = "completed";
     runs[idx].error = null;
     runs[idx].finishedAt = new Date().toISOString();
-    runs[idx].numericRowCount = Array.isArray(analysis.numeric_rows)
-      ? analysis.numeric_rows.length
-      : 0;
-    runs[idx].textRowCount = Array.isArray(analysis.text_rows)
-      ? analysis.text_rows.length
-      : 0;
+    runs[idx].numericRowCount = Array.isArray(analysis.numeric_rows) ? analysis.numeric_rows.length : 0;
+    runs[idx].textRowCount = Array.isArray(analysis.text_rows) ? analysis.text_rows.length : 0;
     runs[idx].hasUsableData = computeUsability(analysis);
-
     writeJson(runsFile, runs);
   }
-
   return analysis;
 }
 
 function getAnalysis(workspaceName, runId) {
-  const analysisFile = getAnalysisFile(workspaceName, runId);
-  return readJson(analysisFile, null);
+  return readJson(getAnalysisFile(workspaceName, runId), null);
 }
 
 function getLatestCompletedAnalysis(workspaceName) {
   const runs = listRuns(workspaceName, 50);
-
   for (const run of runs) {
     if (run.status !== "completed") continue;
     const analysis = getAnalysis(workspaceName, run.runId);
-    if (analysis) {
-      return {
-        run,
-        analysis
-      };
-    }
+    if (analysis) return { run, analysis };
   }
-
   return null;
 }
 
