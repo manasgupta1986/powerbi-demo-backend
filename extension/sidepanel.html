@@ -18,32 +18,15 @@
     </header>
 
     <section class="card">
-      <div class="section-heading">
-        <h2>Workspace Setup</h2>
-      </div>
-
+      <div class="section-heading"><h2>Workspace Setup</h2></div>
       <div class="grid two-col">
-        <label>
-          <span>Backend URL</span>
-          <input id="backendUrl" type="url" placeholder="https://powerbi-demo-backend.onrender.com" />
-        </label>
-        <label>
-          <span>Workspace name</span>
-          <input id="workspaceName" type="text" placeholder="Amazon July Test" />
-        </label>
+        <label><span>Backend URL</span><input id="backendUrl" type="url" placeholder="https://powerbi-demo-backend.onrender.com" /></label>
+        <label><span>Workspace name</span><input id="workspaceName" type="text" placeholder="Amazon July Test" /></label>
       </div>
-
       <div class="grid two-col">
-        <label>
-          <span>Client / Project</span>
-          <input id="clientName" type="text" placeholder="Amazon" />
-        </label>
-        <label>
-          <span>Operator</span>
-          <input id="operatorName" type="text" placeholder="Your name" />
-        </label>
+        <label><span>Client / Project</span><input id="clientName" type="text" placeholder="Amazon" /></label>
+        <label><span>Operator</span><input id="operatorName" type="text" placeholder="Your name" /></label>
       </div>
-
       <div class="button-row">
         <button id="saveSettingsBtn" class="btn btn-secondary">Save settings</button>
         <button id="checkBackendBtn" class="btn btn-primary">Check backend</button>
@@ -63,11 +46,7 @@
             <h2>Current Run</h2>
             <span id="currentRunStatus" class="pill pill-muted">No run</span>
           </div>
-
-          <div id="currentRunSummary" class="status-box empty-state">
-            Start a new run, add screenshots, then analyze the batch.
-          </div>
-
+          <div id="currentRunSummary" class="status-box empty-state">Start a new run, add screenshots, then analyze the batch.</div>
           <div class="button-row action-row">
             <button id="startNewRunBtn" class="btn btn-primary">Start New Run</button>
             <button id="continueLatestBtn" class="btn btn-secondary">Use Latest Saved Run</button>
@@ -79,43 +58,26 @@
             <h2>Step 1 — Add Screenshots</h2>
             <span id="queueCount" class="muted">0 files</span>
           </div>
-
           <div class="grid two-col">
-            <label>
-              <span>Default page</span>
-              <select id="defaultPage">
-                <option value="Traffic Engagement">Traffic Engagement</option>
-                <option value="Purchase Matrix">Purchase Matrix</option>
-                <option value="Purchase Funnel">Purchase Funnel</option>
-              </select>
-            </label>
-            <label>
-              <span>Default filter type</span>
-              <select id="defaultFilterType">
-                <option value="Zone">Zone</option>
-                <option value="NCCS">NCCS</option>
-                <option value="Tier">Tier</option>
-                <option value="Gender">Gender</option>
-                <option value="Age Band">Age Band</option>
-              </select>
-            </label>
+            <label><span>Default page</span><select id="defaultPage"><option value="Traffic Engagement">Traffic Engagement</option><option value="Purchase Matrix">Purchase Matrix</option><option value="Purchase Funnel">Purchase Funnel</option></select></label>
+            <label><span>Default filter type</span><select id="defaultFilterType"><option value="Zone">Zone</option><option value="NCCS">NCCS</option><option value="Tier">Tier</option><option value="Gender">Gender</option><option value="Age Band">Age Band</option></select></label>
           </div>
-
           <input id="fileInput" class="hidden" type="file" accept="image/*" multiple />
-
           <div class="button-row action-row">
             <button id="addScreenshotsBtn" class="btn btn-primary">Add Screenshots</button>
             <button id="clearQueueBtn" class="btn btn-secondary">Clear Queue</button>
           </div>
-
-          <div class="helper-text">
-            After adding one screenshot, either add another one or click <strong>Upload Batch</strong>.
+          <div class="helper-text">Use the arrows to review screenshots one by one. This avoids a long scrolling list.</div>
+          <div id="carouselEmpty" class="queue-list empty-state">No screenshots added yet.</div>
+          <div id="carouselPanel" class="carousel-panel hidden">
+            <div class="carousel-toolbar">
+              <button id="prevItemBtn" class="btn btn-secondary">← Previous</button>
+              <div id="carouselCounter" class="muted">1 of 1</div>
+              <button id="nextItemBtn" class="btn btn-secondary">Next →</button>
+            </div>
+            <div id="carouselCard" class="queue-item"></div>
+            <div id="carouselThumbs" class="thumb-strip"></div>
           </div>
-
-          <div id="uploadQueue" class="queue-list empty-state">
-            No screenshots added yet.
-          </div>
-
           <div class="button-row action-row sticky-cta">
             <button id="uploadBatchBtn" class="btn btn-primary">Upload Batch</button>
             <button id="analyzeBatchBtn" class="btn btn-secondary">Done Adding → Analyze Batch</button>
@@ -127,13 +89,8 @@
             <h2>Step 2 — Extraction Instructions</h2>
             <button id="togglePromptBtn" class="btn btn-ghost">Collapse</button>
           </div>
-
           <div id="promptArea">
-            <label>
-              <span>Prompt</span>
-              <textarea id="promptOverride" rows="12"></textarea>
-            </label>
-
+            <label><span>Prompt</span><textarea id="promptOverride" rows="12"></textarea></label>
             <div class="button-row">
               <button id="resetPromptBtn" class="btn btn-secondary">Reset prompt</button>
               <button id="copyPromptBtn" class="btn btn-secondary">Copy prompt</button>
@@ -146,11 +103,7 @@
             <h2>Step 3 — Analysis Status</h2>
             <span id="analysisStatus" class="pill pill-muted">Idle</span>
           </div>
-
-          <div id="analysisProgress" class="status-box empty-state">
-            No analysis started yet.
-          </div>
-
+          <div id="analysisProgress" class="status-box empty-state">No analysis started yet.</div>
           <div class="button-row action-row">
             <button id="refreshStatusBtn" class="btn btn-secondary">Refresh Status</button>
             <button id="retryAnalysisBtn" class="btn btn-secondary">Retry Analysis</button>
@@ -162,75 +115,32 @@
             <h2>Saved Runs</h2>
             <button id="refreshHistoryBtn" class="btn btn-secondary">Refresh History</button>
           </div>
-
-          <div class="helper-text">
-            These runs are stored on the backend, so they remain available after you close and reopen the extension.
-          </div>
-
-          <div id="historyList" class="history-list empty-state">
-            No saved runs yet.
-          </div>
+          <div id="historyList" class="history-list empty-state">No saved runs yet.</div>
         </section>
       </section>
 
       <section id="tab-report" class="tab-panel">
         <section class="card">
-          <div class="section-heading">
-            <h2>Selected Report</h2>
-            <span id="reportStatus" class="pill pill-muted">No report</span>
-          </div>
-
-          <div id="reportReference" class="status-box empty-state">
-            Select a saved run or complete an analysis first.
-          </div>
-
+          <div class="section-heading"><h2>Selected Report</h2><span id="reportStatus" class="pill pill-muted">No report</span></div>
+          <div id="reportReference" class="status-box empty-state">Select a saved run or complete an analysis first.</div>
           <div class="button-row action-row">
             <button id="useLatestReportBtn" class="btn btn-secondary">Use Latest Completed Run</button>
             <button id="refreshReportBtn" class="btn btn-secondary">Refresh Report</button>
-            <a
-              id="openReportLink"
-              class="btn btn-ghost link-btn"
-              href="#"
-              target="_blank"
-              rel="noopener noreferrer"
-            >Open Full Report</a>
+            <a id="openReportLink" class="btn btn-ghost link-btn" href="#" target="_blank" rel="noopener noreferrer">Open Full Report</a>
           </div>
         </section>
-
-        <section class="card">
-          <div id="reportContainer" class="report-box empty-state">
-            No report available yet.
-          </div>
-        </section>
+        <section class="card"><div id="reportContainer" class="report-box empty-state">No report available yet.</div></section>
       </section>
 
       <section id="tab-ask" class="tab-panel">
         <section class="card">
-          <div class="section-heading">
-            <h2>Chat Reference Run</h2>
-            <span id="chatStatus" class="pill pill-muted">No run selected</span>
-          </div>
-
-          <div id="chatReference" class="status-box empty-state">
-            Chat will automatically use the latest completed run unless you select another saved run.
-          </div>
+          <div class="section-heading"><h2>Chat Reference Run</h2><span id="chatStatus" class="pill pill-muted">No run selected</span></div>
+          <div id="chatReference" class="status-box empty-state">Chat will automatically use the latest completed run unless you select another saved run.</div>
         </section>
-
         <section class="card">
-          <div id="chatMessages" class="chat-box empty-state">
-            Chat will appear here after a usable analysis is available.
-          </div>
-
+          <div id="chatMessages" class="chat-box empty-state">Chat will appear here after a usable analysis is available.</div>
           <div class="chat-compose">
-            <label>
-              <span>Ask a question</span>
-              <textarea
-                id="chatInput"
-                rows="3"
-                placeholder="Ask about trends, top apps, low-confidence values, or differences between runs..."
-              ></textarea>
-            </label>
-
+            <label><span>Ask a question</span><textarea id="chatInput" rows="3" placeholder="Ask about trends, top apps, low-confidence values, or differences between runs..."></textarea></label>
             <div class="button-row action-row">
               <button id="clearChatBtn" class="btn btn-secondary">Clear Chat</button>
               <button id="sendChatBtn" class="btn btn-primary">Send</button>
@@ -240,7 +150,6 @@
       </section>
     </main>
   </div>
-
   <script src="sidepanel.js"></script>
 </body>
 </html>
