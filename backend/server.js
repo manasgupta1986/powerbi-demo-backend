@@ -5,6 +5,7 @@ const fs = require("fs");
 const fsp = require("fs/promises");
 const path = require("path");
 const analystAnalyzeRoutes = require("./analyst/routesAnalyze");
+const analystChatRoutes = require("./analyst/routesChat");
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -299,6 +300,7 @@ app.post("/ask", async (req, res) => {
 
 app.use("/analyst", analystUploadRoutes);
 app.use("/analyst", analystAnalyzeRoutes);
+app.use("/analyst", analystChatRoutes);
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
