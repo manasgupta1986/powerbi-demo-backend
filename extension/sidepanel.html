@@ -3,130 +3,227 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PowerBI Demo Assistant</title>
-  <style>
-    :root {
-      --bg: #f8fafc;
-      --card: #ffffff;
-      --text: #0f172a;
-      --muted: #64748b;
-      --border: #e2e8f0;
-      --primary: #2563eb;
-      --primary-dark: #1d4ed8;
-      --warn: #d97706;
-      --danger: #dc2626;
-    }
-    * { box-sizing: border-box; }
-    body { margin: 0; font-family: Arial, sans-serif; background: var(--bg); color: var(--text); }
-    .wrap { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
-    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 12px; }
-    h1 { margin: 0 0 8px; font-size: 18px; }
-    h2 { margin: 0 0 8px; font-size: 14px; }
-    .muted { color: var(--muted); font-size: 12px; }
-    label { display: block; margin-bottom: 6px; font-size: 12px; font-weight: 700; }
-    input, textarea { width: 100%; padding: 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px; background: #fff; }
-    textarea { min-height: 72px; resize: vertical; }
-    .grid { display: grid; grid-template-columns: 1fr; gap: 10px; }
-    .row { display: flex; gap: 8px; flex-wrap: wrap; }
-    button, .btn-link { border: none; border-radius: 8px; padding: 10px 12px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; }
-    .primary { background: var(--primary); color: #fff; }
-    .primary:hover { background: var(--primary-dark); }
-    .secondary { background: #e2e8f0; color: #0f172a; }
-    .warning { background: #fef3c7; color: #92400e; }
-    .danger { background: #fee2e2; color: #991b1b; }
-    .outline { background: transparent; color: var(--primary); border: 1px solid var(--primary); }
-    .hidden { display: none !important; }
-    .kv { display: grid; grid-template-columns: 110px 1fr; gap: 6px; font-size: 12px; margin-bottom: 4px; }
-    .progress { width: 100%; height: 10px; border-radius: 999px; background: #e5e7eb; overflow: hidden; margin-top: 6px; }
-    .progress-bar { height: 100%; width: 0%; background: var(--primary); transition: width 0.3s ease; }
-    #chatAnswer { white-space: pre-wrap; word-break: break-word; font-size: 13px; line-height: 1.5; }
-    .link-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
-  </style>
+  <title>Data Myner Analyst Console</title>
+  <link rel="stylesheet" href="sidepanel.css" />
 </head>
 <body>
-  <div class="wrap">
-    <div class="card">
-      <h1>PowerBI Demo Assistant</h1>
-      <div class="muted">Guided capture, backend extraction, report links, and grounded Q&amp;A.</div>
-    </div>
+  <div class="app-shell">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">Data Myner</div>
+        <h1>Analyst Console</h1>
+      </div>
+      <div class="topbar-status">
+        <span id="backendStatus" class="pill pill-muted">Backend unknown</span>
+      </div>
+    </header>
 
-    <div class="card">
-      <h2>Configuration</h2>
-      <div class="grid">
-        <div>
-          <label for="clientName">Client name</label>
-          <input id="clientName" type="text" placeholder="Amazon" />
-        </div>
-        <div>
-          <label for="backendUrl">Backend URL</label>
-          <input id="backendUrl" type="text" placeholder="https://powerbi-demo-backend.onrender.com" />
-        </div>
-        <div>
-          <label for="dashboardUrl">Dashboard URL</label>
-          <input id="dashboardUrl" type="text" placeholder="https://app.powerbi.com/..." />
-        </div>
+    <section class="card">
+      <div class="section-heading">
+        <h2>Workspace Setup</h2>
       </div>
-      <div class="row" style="margin-top:10px;">
-        <button id="startRunBtn" class="primary">Start guided run</button>
-        <button id="refreshBtn" class="secondary">Refresh state</button>
-        <button id="finishRunBtn" class="warning">Mark run complete</button>
-        <button id="resetBtn" class="danger">Reset local session</button>
-      </div>
-    </div>
 
-    <div class="card">
-      <h2>Guided queue</h2>
-      <div class="kv"><strong>Run ID</strong><span id="runIdText">--</span></div>
-      <div class="kv"><strong>Progress</strong><span id="progressText">0 / 0</span></div>
-      <div class="kv"><strong>Current step</strong><span id="currentStepText">--</span></div>
-      <div class="kv"><strong>Next step</strong><span id="nextStepText">--</span></div>
-      <div class="kv"><strong>Status</strong><span id="runStatusText">Idle</span></div>
-      <div class="row" style="margin-top:10px;">
-        <button id="captureBtn" class="primary">Done, capture now</button>
-        <button id="skipBtn" class="secondary">Skip step</button>
-      </div>
-      <div class="muted" style="margin-top:10px;">Set the correct Power BI tab and filter first, then click <strong>Done, capture now</strong>.</div>
-    </div>
+      <div class="grid two-col">
+        <label>
+          <span>Backend URL</span>
+          <input
+            id="backendUrl"
+            type="url"
+            placeholder="https://powerbi-demo-backend.onrender.com"
+          />
+        </label>
 
-    <div id="progressCard" class="card hidden">
-      <h2>Capture progress</h2>
-      <div class="kv"><strong>Screenshot</strong><span id="screenshotStatus">Waiting</span></div>
-      <div class="progress"><div id="screenshotBar" class="progress-bar"></div></div>
-      <div class="kv" style="margin-top:10px;"><strong>Upload</strong><span id="uploadStatus">Waiting</span></div>
-      <div class="progress"><div id="uploadBar" class="progress-bar"></div></div>
-      <div class="kv" style="margin-top:10px;"><strong>Extraction</strong><span id="extractionStatus">Waiting</span></div>
-      <div class="progress"><div id="extractionBar" class="progress-bar"></div></div>
-      <div id="progressMessage" class="muted" style="margin-top:8px;">Waiting for next action.</div>
-    </div>
+        <label>
+          <span>Workspace name</span>
+          <input
+            id="workspaceName"
+            type="text"
+            placeholder="Amazon July Test"
+          />
+        </label>
+      </div>
 
-    <div id="postCaptureCard" class="card hidden">
-      <h2>Capture result</h2>
-      <div class="kv"><strong>Upload</strong><span id="uploadStatusLine">--</span></div>
-      <div class="kv"><strong>Extraction</strong><span id="extractionStatusLine">--</span></div>
-      <div class="kv"><strong>Summary</strong><span id="summaryAvailabilityLine">--</span></div>
-      <div class="kv"><strong>Next step</strong><span id="postNextStepLine">--</span></div>
-      <div class="link-row">
-        <a id="viewReportBtn" class="btn-link outline hidden" href="#" target="_blank">View summary report</a>
-        <a id="viewLatestBtn" class="btn-link outline hidden" href="#" target="_blank">Open latest data</a>
-      </div>
-      <div id="resultMessage" class="muted" style="margin-top:8px;"></div>
-    </div>
+      <div class="grid two-col">
+        <label>
+          <span>Client / Project</span>
+          <input
+            id="clientName"
+            type="text"
+            placeholder="Amazon"
+          />
+        </label>
 
-    <div class="card">
-      <h2>Run chat</h2>
-      <div class="grid">
-        <div>
-          <label for="chatQuestion">Question</label>
-          <textarea id="chatQuestion" placeholder="Example: What are the key metrics extracted from the latest run?"></textarea>
-        </div>
+        <label>
+          <span>Operator</span>
+          <input
+            id="operatorName"
+            type="text"
+            placeholder="Your name"
+          />
+        </label>
       </div>
-      <div class="row" style="margin-top:10px;">
-        <button id="askBtn" class="primary">Ask</button>
+
+      <div class="button-row">
+        <button id="saveSettingsBtn" class="btn btn-secondary">Save settings</button>
+        <button id="checkBackendBtn" class="btn btn-primary">Check backend</button>
       </div>
-      <div id="chatMeta" class="muted" style="margin-top:10px;">No answer yet.</div>
-      <div id="chatAnswer" style="margin-top:8px;"></div>
-    </div>
+    </section>
+
+    <nav class="tab-nav">
+      <button class="tab-btn active" data-tab="tab-analyst">Analyst</button>
+      <button class="tab-btn" data-tab="tab-report">Summary Report</button>
+      <button class="tab-btn" data-tab="tab-chat">Chat</button>
+    </nav>
+
+    <main class="tab-content">
+      <!-- ANALYST TAB -->
+      <section id="tab-analyst" class="tab-panel active">
+        <section class="card">
+          <div class="section-heading">
+            <h2>Screenshot Upload</h2>
+            <span id="queueCount" class="muted">0 files</span>
+          </div>
+
+          <div class="grid two-col">
+            <label>
+              <span>Default page</span>
+              <select id="defaultPage">
+                <option value="Traffic Engagement">Traffic Engagement</option>
+                <option value="Purchase Matrix">Purchase Matrix</option>
+                <option value="Purchase Funnel">Purchase Funnel</option>
+              </select>
+            </label>
+
+            <label>
+              <span>Default filter type</span>
+              <select id="defaultFilterType">
+                <option value="Zone">Zone</option>
+                <option value="NCCS">NCCS</option>
+                <option value="Tier">Tier</option>
+                <option value="Gender">Gender</option>
+                <option value="Age Band">Age Band</option>
+              </select>
+            </label>
+          </div>
+
+          <label>
+            <span>Select screenshots</span>
+            <input id="fileInput" type="file" accept="image/*" multiple />
+          </label>
+
+          <div class="helper-text">
+            File names like <code>Traffic engagement_zone west</code> can be auto-tagged and then edited below.
+          </div>
+
+          <div id="uploadQueue" class="queue-list empty-state">
+            No screenshots added yet.
+          </div>
+
+          <div class="button-row">
+            <button id="clearQueueBtn" class="btn btn-secondary">Clear queue</button>
+            <button id="startUploadBtn" class="btn btn-primary">Upload screenshots</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="section-heading">
+            <h2>Prompt for AI Extraction</h2>
+            <button id="togglePromptBtn" class="btn btn-ghost">Collapse</button>
+          </div>
+
+          <div id="promptArea">
+            <label>
+              <span>Prompt</span>
+              <textarea id="promptOverride" rows="12"></textarea>
+            </label>
+
+            <div class="button-row">
+              <button id="resetPromptBtn" class="btn btn-secondary">Reset prompt</button>
+              <button id="copyPromptBtn" class="btn btn-secondary">Copy prompt</button>
+            </div>
+
+            <div class="helper-text">
+              This prompt is sent to the cloud backend when analysis starts.
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="section-heading">
+            <h2>Analysis</h2>
+            <span id="analysisStatus" class="pill pill-muted">Idle</span>
+          </div>
+
+          <div class="button-row">
+            <button id="startAnalysisBtn" class="btn btn-primary">Start AI analysis</button>
+            <button id="refreshStatusBtn" class="btn btn-secondary">Refresh status</button>
+          </div>
+
+          <div id="analysisProgress" class="status-box empty-state">
+            No analysis started yet.
+          </div>
+        </section>
+      </section>
+
+      <!-- REPORT TAB -->
+      <section id="tab-report" class="tab-panel">
+        <section class="card">
+          <div class="section-heading">
+            <h2>Summary Report</h2>
+            <span id="reportStatus" class="pill pill-muted">No report</span>
+          </div>
+
+          <div class="button-row">
+            <button id="refreshReportBtn" class="btn btn-secondary">Refresh report</button>
+            <a
+              id="openReportLink"
+              class="btn btn-ghost link-btn"
+              href="#"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Open full report
+            </a>
+          </div>
+
+          <div id="reportContainer" class="report-box empty-state">
+            No report available yet.
+          </div>
+        </section>
+      </section>
+
+      <!-- CHAT TAB -->
+      <section id="tab-chat" class="tab-panel">
+        <section class="card">
+          <div class="section-heading">
+            <h2>Grounded Chat</h2>
+            <span id="chatStatus" class="pill pill-muted">Dataset only</span>
+          </div>
+
+          <div id="chatMessages" class="chat-box empty-state">
+            Chat will appear here after analysis is completed.
+          </div>
+
+          <div class="chat-compose">
+            <label>
+              <span>Ask a question</span>
+              <textarea
+                id="chatInput"
+                rows="3"
+                placeholder="Ask about weekly trends, app contribution, top changes, uncertainties..."
+              ></textarea>
+            </label>
+
+            <div class="button-row">
+              <button id="clearChatBtn" class="btn btn-secondary">Clear chat</button>
+              <button id="sendChatBtn" class="btn btn-primary">Send</button>
+            </div>
+          </div>
+        </section>
+      </section>
+    </main>
   </div>
+
   <script src="sidepanel.js"></script>
 </body>
 </html>
