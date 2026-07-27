@@ -1,31 +1,29 @@
 {
   "manifest_version": 3,
-  "name": "PowerBI Demo Assistant",
-  "version": "4.0.0",
-  "description": "Guided semi-automated Power BI capture assistant with AI extraction and closed-book Q&A",
-  "permissions": ["storage", "tabs", "activeTab", "sidePanel","scripting"],
+  "name": "Data Myner Analyst Console",
+  "version": "1.0.0",
+  "description": "Upload tagged dashboard screenshots, run cloud AI extraction, review summary reports, and chat over extracted data.",
+  "permissions": [
+    "storage",
+    "sidePanel",
+    "tabs",
+    "activeTab"
+  ],
   "host_permissions": [
-    "https://app.powerbi.com/*",
-    "https://*.powerbi.com/*",
-    "https://*.onrender.com/*",
+    "https://powerbi-demo-backend.onrender.com/*",
     "http://localhost/*",
-    "http://localhost:*/*",
-    "<all_urls>"
+    "http://localhost:3000/*",
+    "http://localhost:8787/*",
+    "https://*/*",
+    "http://*/*"
   ],
   "background": {
     "service_worker": "background.js"
   },
+  "action": {
+    "default_title": "Open Data Myner Analyst Console"
+  },
   "side_panel": {
     "default_path": "sidepanel.html"
-  },
-  "action": {
-    "default_title": "PowerBI Demo Assistant"
-  },
-  "content_scripts": [
-    {
-      "matches": ["https://app.powerbi.com/*", "https://*.powerbi.com/*"],
-      "js": ["content.js"],
-      "run_at": "document_idle"
-    }
-  ]
+  }
 }
