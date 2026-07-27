@@ -2,26 +2,14 @@
   "manifest_version": 3,
   "name": "Data Myner Analyst Console",
   "version": "1.0.0",
-  "description": "Upload tagged dashboard screenshots, run cloud AI extraction, review summary reports, and chat over extracted data.",
-  "permissions": [
-    "storage",
-    "sidePanel",
-    "tabs",
-    "activeTab"
-  ],
-  "host_permissions": [
-    "https://powerbi-demo-backend.onrender.com/*",
-    "http://localhost/*",
-    "http://localhost:3000/*",
-    "http://localhost:8787/*",
-    "https://*/*",
-    "http://*/*"
-  ],
+  "description": "Upload tagged dashboard screenshots, run cloud extraction, review reports, and chat over the latest usable run.",
+  "permissions": ["storage", "sidePanel"],
+  "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "Open Data Myner Analyst Console"
+    "default_title": "Open Analyst Console"
   },
   "side_panel": {
     "default_path": "sidepanel.html"
