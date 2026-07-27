@@ -30,11 +30,20 @@ function slugify(value) {
     .replace(/^-+|-+$/g, "") || "default-workspace";
 }
 
+function safeFilePart(value) {
+  return String(value || "")
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, "_")
+    .replace(/^_+|_+$/g, "") || "file";
+}
+
 function getWorkspaceParts(workspaceName) {
   const workspaceKey = slugify(workspaceName || "default-workspace");
   const workspaceDir = path.join(DATA_DIR, "analyst", workspaceKey);
+  const uploadsDir = path.join(workspaceDir, "uploads");
   ensureDir(workspaceDir);
-  return { workspaceKey, workspaceDir };
+  ensureDir(uploadsDir);
+  return { workspaceKey, workspaceDir, uploadsDir };
 }
 
 function getRunsFile(workspaceName) {
@@ -54,6 +63,7 @@ function createRun({ workspaceName, clientName = "", operatorName = "" }) {
     status: "started",
     createdAt: new Date().toISOString(),
     finishedAt: null,
+    fileCount: 0,
     files: []
   };
 
@@ -68,6 +78,42 @@ function getLatestRun(workspaceName) {
   return runs.length ? runs[0] : null;
 }
 
+function getRun(workspaceName, runId) {
+  const runsFile = getRunsFile(workspaceName);
+  const runs = readJson(runsFile, []);
+  return runs.find((run) => run.runId === runId) || null;
+}
+
+function getExtensionFromDataUrl(dataUrl) {
+  const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,/.exec(dataUrl || "");
+  const mime = match ? match[1] : "image/png";
+
+  if (mime === "image/jpeg") return ".jpg";
+  if (mime === "image/webp") return ".webp";
+  if (mime === "image/gif") return ".gif";
+  return ".png";
+}
+
+function saveBase64Image({ workspaceName, runId, fileName, dataUrl }) {
+  if (!dataUrl || typeof dataUrl !== "string" || !dataUrl.startsWith("data:image/")) {
+    throw new Error("Invalid image dataUrl");
+  }
+
+  const { uploadsDir } = getWorkspaceParts(workspaceName);
+  const ext = getExtensionFromDataUrl(dataUrl);
+  const baseName = safeFilePart(path.parse(fileName || "upload").name);
+  const storedFileName = `${runId}_${Date.now()}_${baseName}${ext}`;
+  const filePath = path.join(uploadsDir, storedFileName);
+
+  const base64 = dataUrl.split(",")[1];
+  fs.writeFileSync(filePath, Buffer.from(base64, "base64"));
+
+  return {
+    storedFileName,
+    filePath
+  };
+}
+
 function addFileToRun({
   workspaceName,
   runId,
@@ -75,7 +121,8 @@ function addFileToRun({
   page,
   filterType,
   filterValue,
-  note
+  note,
+  dataUrl
 }) {
   const runsFile = getRunsFile(workspaceName);
   const runs = readJson(runsFile, []);
@@ -85,14 +132,25 @@ function addFileToRun({
     throw new Error("Run not found");
   }
 
+  const savedImage = saveBase64Image({
+    workspaceName,
+    runId,
+    fileName,
+    dataUrl
+  });
+
   runs[idx].files.push({
     fileName: fileName || "",
+    storedFileName: savedImage.storedFileName,
+    imagePath: savedImage.filePath,
     page: page || "",
     filterType: filterType || "",
     filterValue: filterValue || "",
     note: note || "",
     uploadedAt: new Date().toISOString()
   });
+
+  runs[idx].fileCount = runs[idx].files.length;
 
   writeJson(runsFile, runs);
   return runs[idx];
@@ -117,6 +175,7 @@ function finishRun({ workspaceName, runId }) {
 module.exports = {
   createRun,
   getLatestRun,
+  getRun,
   addFileToRun,
   finishRun
 };
