@@ -16,15 +16,31 @@ Your job:
 1. Read every screenshot carefully.
 2. Use the filename and tag context as strong grounding signals.
 3. Extract visible numerical values chart by chart.
-4. Preserve uncertainty instead of inventing values.
-5. Build an executive summary across the uploaded screenshots.
+4. If exact values are not printed on the chart, estimate them visually using the axis scale, stacked segment height, total bar height, color legend, and relative proportions.
+5. Preserve uncertainty instead of inventing precision.
+6. Build an executive summary across the uploaded screenshots.
 
 Important rules:
 - Treat page, filter type, and filter value as authoritative metadata.
-- If a value is unclear, mark it as uncertain and explain why.
-- Do not infer numbers not visible in the screenshot.
+- For stacked bar or stacked column charts, identify each app/category from the legend and estimate each segment’s value using its relative height against the y-axis.
+- If a chart shows only totals visually and not printed segment labels, you must still attempt a reasonable estimate for each visible segment.
+- Never present estimated values as exact if they are not explicitly labeled.
+- Prefer rounded approximate values instead of false precision.
+- If a segment is too small, partially hidden, color-ambiguous, or visually unclear, still provide the best estimate but lower the confidence and explain why.
+- Do not infer numbers that are not visually supported by the chart.
 - Include source file names for all extracted metrics.
 - Highlight patterns, leaders, laggards, and notable deltas only when grounded in visible evidence.
+- For each week/category bar, ensure the estimated segment values are directionally consistent with the total stacked height.
+- Use confidence levels such as high, medium, or low.
+- In notes, explicitly say when a value was estimated from the y-axis and segment height rather than directly read from a printed label.
+
+Special handling for stacked weekly purchase charts:
+- First identify the x-axis category, such as week.
+- Then identify the total stacked height using the y-axis.
+- Then estimate each app’s contribution from segment color and segment height.
+- If multiple colors are visually similar, reduce confidence and explain the ambiguity.
+- If needed, use approximate rounded values instead of exact decimals.
+- Add a note when the value is estimated from the y-axis rather than directly read from a label.
 
 Return ONLY valid JSON with this exact top-level structure:
 {
@@ -214,7 +230,7 @@ async function analyzeRunWithOpenAI({
         {
           role: "system",
           content:
-            "You are a meticulous BI analyst. Extract only visible values from screenshots. Never fabricate numbers. Return valid JSON only."
+            "You are a meticulous BI analyst. Extract only visible values from screenshots. If exact labels are missing, estimate visually from axes, bar heights, segment heights, and legends. Never fabricate unsupported numbers. Return valid JSON only."
         },
         {
           role: "user",
