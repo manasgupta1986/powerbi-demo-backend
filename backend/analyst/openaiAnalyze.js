@@ -15,12 +15,26 @@ const EST_SECONDS_FOR_SUMMARY = Math.max(4, Number(process.env.ANALYST_EST_SECON
 const DEFAULT_ANALYSIS_PROMPT = `
 You are analyzing tagged dashboard screenshots from a business intelligence workflow.
 
-Important:
+Important operating rules:
 - the backend may split each tall dashboard screenshot into multiple focused chart slices
 - each slice belongs to one original screenshot and carries metadata
 - estimate values visually when labels are missing, but do not invent unsupported precision
 - avoid duplicate rows when overlapping slices show the same chart area
 - use the client/platform name when forming insights for CMI and category leads
+- do not mention any dimension that is not visibly present in the supplied screenshots
+- if category data is not visible, do not mention category insights
+- if week labels are visible, preserve them faithfully
+
+Week mapping rule:
+- when a chart uses labels such as "2026-W1 – 19/12/2025", interpret the date after the dash as the week start date
+- preserve both the week label and the week start date when visible
+- if subsequent week labels continue in the same visible pattern, treat them as +7 day intervals only when the sequence is visually supported by the chart
+- if the sequence is not visually clear, say so in notes rather than guessing
+
+Insight rule:
+- key findings and recommendations must be insights, not simple chart reading
+- move from observation to implication: what is changing, why it matters, where to act
+- if evidence is thin, say that clearly instead of overstating
 
 Return only valid JSON using this structure:
 {
@@ -30,6 +44,8 @@ Return only valid JSON using this structure:
       "page": "",
       "filter_type": "",
       "filter_value": "",
+      "time_period": "",
+      "week_start_date": "",
       "metric": "",
       "value": "",
       "unit": "",
@@ -43,6 +59,8 @@ Return only valid JSON using this structure:
       "page": "",
       "filter_type": "",
       "filter_value": "",
+      "time_period": "",
+      "week_start_date": "",
       "label": "",
       "text": "",
       "notes": ""
@@ -94,6 +112,8 @@ function normalizeAnalysis(raw, run) {
       page: ensureString(row.page),
       filter_type: ensureString(row.filter_type),
       filter_value: ensureString(row.filter_value),
+      time_period: ensureString(row.time_period),
+      week_start_date: ensureString(row.week_start_date),
       metric: ensureString(row.metric),
       value: ensureString(row.value),
       unit: ensureString(row.unit),
@@ -105,6 +125,8 @@ function normalizeAnalysis(raw, run) {
       page: ensureString(row.page),
       filter_type: ensureString(row.filter_type),
       filter_value: ensureString(row.filter_value),
+      time_period: ensureString(row.time_period),
+      week_start_date: ensureString(row.week_start_date),
       label: ensureString(row.label),
       text: ensureString(row.text),
       notes: ensureString(row.notes)
@@ -292,7 +314,7 @@ async function callOpenAIJson({ apiKey, messages }) {
     },
     body: JSON.stringify({
       model: OPENAI_MODEL,
-      temperature: 0.2,
+      temperature: 0.1,
       response_format: { type: "json_object" },
       messages
     })
@@ -352,6 +374,7 @@ async function extractBatchOnce({ apiKey, batch, promptText, detailMode, maxWidt
       `This is extraction batch ${batchIndex} of ${batchCount}.`,
       "Return JSON only.",
       "Focus on rows visible in these images only.",
+      "Do not mention any category, cohort, or dimension unless it is visibly present in the provided chart slices.",
       "Slice metadata:",
       metadataLines
     ].join("\n")
@@ -372,7 +395,7 @@ async function extractBatchOnce({ apiKey, batch, promptText, detailMode, maxWidt
     messages: [
       {
         role: "system",
-        content: "You are a meticulous BI analyst. Extract only visually supported values from the provided chart slices. Estimate cautiously when exact labels are not visible. Return JSON only."
+        content: "You are a meticulous BI analyst. Extract only visually supported values from the provided chart slices. Estimate cautiously when exact labels are not visible. Preserve week labels and week start dates when visible. Do not hallucinate missing dimensions. Return JSON only."
       },
       { role: "user", content: userContent }
     ]
@@ -487,7 +510,10 @@ async function summarizeCombinedRows({ apiKey, run, numericRows, textRows, promp
   const summaryPrompt = [
     "Create the final combined report from the extracted rows below.",
     "The audience is CMI and category leads for the named client/platform.",
-    "Do not invent new metrics. Use only the supplied rows.",
+    "Do not invent new metrics or new dimensions.",
+    "Do not mention categories unless category data is explicitly present in the extracted rows.",
+    "Where week labels and week_start_date values are available, describe trends across the latest visible weeks, especially the last 4 visible weeks when possible.",
+    "Key findings must be insight-oriented, not chart narration. Each finding should explain what is changing, why it matters, and what commercial implication follows.",
     "If the extraction is thin or approximate, say so in summary and data_quality_notes.",
     "Return JSON only using the same top-level structure.",
     "Keep numeric_rows and text_rows exactly aligned to the supplied rows.",
@@ -501,7 +527,7 @@ async function summarizeCombinedRows({ apiKey, run, numericRows, textRows, promp
     messages: [
       {
         role: "system",
-        content: "You are a BI reporting assistant. Build a concise executive report from already extracted rows. Do not add unsupported facts. Tailor the insights for CMI and category leads. Return JSON only."
+        content: "You are a BI reporting assistant. Build an executive report only from already extracted rows. Produce insight-led conclusions for CMI and category leads. If a conclusion is not supported by rows, do not state it. When week labels exist, discuss recent trends across the latest visible weeks. Return JSON only."
       },
       {
         role: "user",
@@ -592,6 +618,8 @@ async function analyzeRunWithOpenAI({ workspaceName, runId, promptOverride }) {
     ensureString(row.page),
     ensureString(row.filter_type),
     ensureString(row.filter_value),
+    ensureString(row.time_period),
+    ensureString(row.week_start_date),
     ensureString(row.metric),
     ensureString(row.value),
     ensureString(row.unit),
@@ -603,6 +631,8 @@ async function analyzeRunWithOpenAI({ workspaceName, runId, promptOverride }) {
     ensureString(row.page),
     ensureString(row.filter_type),
     ensureString(row.filter_value),
+    ensureString(row.time_period),
+    ensureString(row.week_start_date),
     ensureString(row.label),
     ensureString(row.text),
     ensureString(row.notes)
