@@ -1,8 +1,7 @@
-const fs = require("fs");
 const path = require("path");
 const sharp = require("sharp");
 
-const { getRun, updateRunStatus, saveAnalysis } = require("./store");
+const { getRun, updateRunStatus, updateRunProgress, saveAnalysis } = require("./store");
 const { createSlicesForImage } = require("./imageSlicer");
 
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1";
@@ -10,6 +9,8 @@ const MAX_IMAGES_PER_BATCH = Math.max(1, Number(process.env.ANALYST_MAX_IMAGES_P
 const MAX_SLICES_PER_FILE = Math.max(1, Number(process.env.ANALYST_MAX_SLICES_PER_FILE || 6));
 const DEFAULT_VISION_MAX_WIDTH = Math.max(700, Number(process.env.ANALYST_VISION_MAX_WIDTH || 1100));
 const DEFAULT_VISION_DETAIL = process.env.ANALYST_VISION_DETAIL || "low";
+const EST_SECONDS_PER_SLICE = Math.max(3, Number(process.env.ANALYST_EST_SECONDS_PER_SLICE || 8));
+const EST_SECONDS_FOR_SUMMARY = Math.max(4, Number(process.env.ANALYST_EST_SECONDS_FOR_SUMMARY || 10));
 
 const DEFAULT_ANALYSIS_PROMPT = `
 You are analyzing tagged dashboard screenshots from a business intelligence workflow.
@@ -19,6 +20,7 @@ Important:
 - each slice belongs to one original screenshot and carries metadata
 - estimate values visually when labels are missing, but do not invent unsupported precision
 - avoid duplicate rows when overlapping slices show the same chart area
+- use the client/platform name when forming insights for CMI and category leads
 
 Return only valid JSON using this structure:
 {
@@ -85,6 +87,7 @@ function normalizeAnalysis(raw, run) {
   return {
     runId: run.runId,
     workspaceName: run.workspaceName,
+    clientName: ensureString(run.clientName),
     createdAt: new Date().toISOString(),
     numeric_rows: normalizeRows(safe.numeric_rows, (row) => ({
       source_file: ensureString(row.source_file),
@@ -200,9 +203,39 @@ async function imagePathToDataUrl(filePath, maxWidth, detailMode) {
   return `data:${mime};base64,${buffer.toString("base64")}`;
 }
 
-async function buildSliceInputs(run) {
+function buildEstimatedSeconds(totalSlices, processedSlices, totalBatches, currentPhase) {
+  const remainingSlices = Math.max(0, totalSlices - processedSlices);
+  const base = remainingSlices * EST_SECONDS_PER_SLICE;
+  if (currentPhase === "summarizing") return EST_SECONDS_FOR_SUMMARY;
+  if (processedSlices >= totalSlices && totalBatches > 0) return EST_SECONDS_FOR_SUMMARY;
+  return base + EST_SECONDS_FOR_SUMMARY;
+}
+
+async function buildSliceInputs(run, workspaceName) {
   const slices = [];
-  for (const file of run.files) {
+  const totalFiles = Array.isArray(run.files) ? run.files.length : 0;
+
+  for (let fileIndex = 0; fileIndex < totalFiles; fileIndex += 1) {
+    const file = run.files[fileIndex];
+    updateRunProgress({
+      workspaceName,
+      runId: run.runId,
+      progress: {
+        phase: "slicing",
+        message: `Slicing ${file.fileName}`,
+        currentFileName: file.fileName,
+        currentFileIndex: fileIndex + 1,
+        totalFiles,
+        currentSliceIndex: 0,
+        totalSlicesForFile: 0,
+        processedSlices: slices.length,
+        totalSlices: slices.length,
+        currentBatchIndex: 0,
+        totalBatches: 0,
+        estimatedSecondsRemaining: buildEstimatedSeconds(slices.length + 1, 0, 0, "slicing")
+      }
+    });
+
     const fileDir = path.dirname(file.imagePath);
     const sliceOutputDir = path.join(fileDir, "slices", path.parse(file.storedFileName || file.fileName || "upload").name);
     const sliced = await createSlicesForImage({
@@ -210,6 +243,7 @@ async function buildSliceInputs(run) {
       outputDir: sliceOutputDir,
       prefix: path.parse(file.storedFileName || file.fileName || "upload").name
     });
+
     for (const slice of sliced.slices) {
       slices.push({
         sourceFile: file.fileName,
@@ -220,10 +254,32 @@ async function buildSliceInputs(run) {
         sliceLabel: slice.sliceLabel,
         sliceIndex: slice.sliceIndex,
         slicePath: slice.slicePath,
-        totalSlicesForFile: sliced.sliceCount
+        totalSlicesForFile: sliced.sliceCount,
+        fileIndex: fileIndex + 1,
+        totalFiles
       });
     }
+
+    updateRunProgress({
+      workspaceName,
+      runId: run.runId,
+      progress: {
+        phase: "slicing",
+        message: `Created ${sliced.sliceCount} slice(s) for ${file.fileName}`,
+        currentFileName: file.fileName,
+        currentFileIndex: fileIndex + 1,
+        totalFiles,
+        currentSliceIndex: sliced.sliceCount,
+        totalSlicesForFile: sliced.sliceCount,
+        processedSlices: slices.length,
+        totalSlices: slices.length,
+        currentBatchIndex: 0,
+        totalBatches: 0,
+        estimatedSecondsRemaining: buildEstimatedSeconds(slices.length, 0, 0, "slicing")
+      }
+    });
   }
+
   return limitSlicesPerFile(slices);
 }
 
@@ -254,7 +310,27 @@ function isTooLargeError(error) {
   return message.includes("request too large") || message.includes("tokens per min") || message.includes("too many tokens");
 }
 
-async function extractBatchOnce({ apiKey, batch, promptText, detailMode, maxWidth, batchIndex, batchCount }) {
+async function extractBatchOnce({ apiKey, batch, promptText, detailMode, maxWidth, batchIndex, batchCount, run, workspaceName, processedSlicesBeforeBatch, totalSlices }) {
+  const first = batch[0];
+  updateRunProgress({
+    workspaceName,
+    runId: run.runId,
+    progress: {
+      phase: "extracting",
+      message: `Extracting batch ${batchIndex} of ${batchCount} from ${first.sourceFile}`,
+      currentFileName: first.sourceFile,
+      currentFileIndex: first.fileIndex,
+      totalFiles: first.totalFiles,
+      currentSliceIndex: first.sliceIndex,
+      totalSlicesForFile: first.totalSlicesForFile,
+      processedSlices: processedSlicesBeforeBatch,
+      totalSlices,
+      currentBatchIndex: batchIndex,
+      totalBatches: batchCount,
+      estimatedSecondsRemaining: buildEstimatedSeconds(totalSlices, processedSlicesBeforeBatch, batchCount, "extracting")
+    }
+  });
+
   const metadataLines = batch.map((slice, index) => [
     `${index + 1}.`,
     `source_file=${slice.sourceFile}`,
@@ -272,6 +348,7 @@ async function extractBatchOnce({ apiKey, batch, promptText, detailMode, maxWidt
     text: [
       promptText,
       "",
+      `Client/platform name: ${run.clientName || "Not provided"}`,
       `This is extraction batch ${batchIndex} of ${batchCount}.`,
       "Return JSON only.",
       "Focus on rows visible in these images only.",
@@ -302,7 +379,7 @@ async function extractBatchOnce({ apiKey, batch, promptText, detailMode, maxWidt
   });
 }
 
-async function extractBatchAdaptive({ apiKey, batch, promptText, batchIndex, batchCount }) {
+async function extractBatchAdaptive({ apiKey, batch, promptText, batchIndex, batchCount, run, workspaceName, processedSlicesBeforeBatch, totalSlices }) {
   try {
     return await extractBatchOnce({
       apiKey,
@@ -311,15 +388,49 @@ async function extractBatchAdaptive({ apiKey, batch, promptText, batchIndex, bat
       detailMode: DEFAULT_VISION_DETAIL,
       maxWidth: DEFAULT_VISION_MAX_WIDTH,
       batchIndex,
-      batchCount
+      batchCount,
+      run,
+      workspaceName,
+      processedSlicesBeforeBatch,
+      totalSlices
     });
   } catch (error) {
     if (!isTooLargeError(error)) throw error;
 
+    updateRunProgress({
+      workspaceName,
+      runId: run.runId,
+      progress: {
+        phase: "extracting",
+        message: `Request too large, reducing batch size for ${batch[0]?.sourceFile || "current file"}`,
+        estimatedSecondsRemaining: buildEstimatedSeconds(totalSlices, processedSlicesBeforeBatch, batchCount, "extracting")
+      }
+    });
+
     if (batch.length > 1) {
       const midpoint = Math.ceil(batch.length / 2);
-      const left = await extractBatchAdaptive({ apiKey, batch: batch.slice(0, midpoint), promptText, batchIndex, batchCount });
-      const right = await extractBatchAdaptive({ apiKey, batch: batch.slice(midpoint), promptText, batchIndex, batchCount });
+      const left = await extractBatchAdaptive({
+        apiKey,
+        batch: batch.slice(0, midpoint),
+        promptText,
+        batchIndex,
+        batchCount,
+        run,
+        workspaceName,
+        processedSlicesBeforeBatch,
+        totalSlices
+      });
+      const right = await extractBatchAdaptive({
+        apiKey,
+        batch: batch.slice(midpoint),
+        promptText,
+        batchIndex,
+        batchCount,
+        run,
+        workspaceName,
+        processedSlicesBeforeBatch: processedSlicesBeforeBatch + batch.slice(0, midpoint).length,
+        totalSlices
+      });
       return {
         numeric_rows: [...ensureArray(left.numeric_rows), ...ensureArray(right.numeric_rows)],
         text_rows: [...ensureArray(left.text_rows), ...ensureArray(right.text_rows)],
@@ -335,15 +446,39 @@ async function extractBatchAdaptive({ apiKey, batch, promptText, batchIndex, bat
       detailMode: "low",
       maxWidth: 850,
       batchIndex,
-      batchCount
+      batchCount,
+      run,
+      workspaceName,
+      processedSlicesBeforeBatch,
+      totalSlices
     });
   }
 }
 
-async function summarizeCombinedRows({ apiKey, run, numericRows, textRows, promptText }) {
+async function summarizeCombinedRows({ apiKey, run, numericRows, textRows, promptText, workspaceName }) {
+  updateRunProgress({
+    workspaceName,
+    runId: run.runId,
+    progress: {
+      phase: "summarizing",
+      message: `Building final report for ${run.clientName || run.workspaceName}`,
+      currentFileName: null,
+      currentFileIndex: Array.isArray(run.files) ? run.files.length : 0,
+      totalFiles: Array.isArray(run.files) ? run.files.length : 0,
+      currentSliceIndex: 0,
+      totalSlicesForFile: 0,
+      processedSlices: numericRows.length + textRows.length,
+      totalSlices: numericRows.length + textRows.length,
+      currentBatchIndex: 0,
+      totalBatches: 0,
+      estimatedSecondsRemaining: EST_SECONDS_FOR_SUMMARY
+    }
+  });
+
   const compactPayload = {
     runId: run.runId,
     workspaceName: run.workspaceName,
+    clientName: run.clientName || "",
     screenshotCount: Array.isArray(run.files) ? run.files.length : 0,
     numeric_rows: numericRows,
     text_rows: textRows
@@ -351,6 +486,7 @@ async function summarizeCombinedRows({ apiKey, run, numericRows, textRows, promp
 
   const summaryPrompt = [
     "Create the final combined report from the extracted rows below.",
+    "The audience is CMI and category leads for the named client/platform.",
     "Do not invent new metrics. Use only the supplied rows.",
     "If the extraction is thin or approximate, say so in summary and data_quality_notes.",
     "Return JSON only using the same top-level structure.",
@@ -365,7 +501,7 @@ async function summarizeCombinedRows({ apiKey, run, numericRows, textRows, promp
     messages: [
       {
         role: "system",
-        content: "You are a BI reporting assistant. Build a concise executive report from already extracted rows. Do not add unsupported facts. Return JSON only."
+        content: "You are a BI reporting assistant. Build a concise executive report from already extracted rows. Do not add unsupported facts. Tailor the insights for CMI and category leads. Return JSON only."
       },
       {
         role: "user",
@@ -384,12 +520,32 @@ async function analyzeRunWithOpenAI({ workspaceName, runId, promptOverride }) {
   if (!Array.isArray(run.files) || !run.files.length) throw new Error("No uploaded screenshots found for this run");
 
   updateRunStatus({ workspaceName, runId, status: "extracting", error: null });
+  updateRunProgress({
+    workspaceName,
+    runId,
+    progress: {
+      phase: "queued",
+      message: `Preparing ${run.files.length} screenshot(s) for slicing`,
+      currentFileName: null,
+      currentFileIndex: 0,
+      totalFiles: run.files.length,
+      currentSliceIndex: 0,
+      totalSlicesForFile: 0,
+      processedSlices: 0,
+      totalSlices: 0,
+      currentBatchIndex: 0,
+      totalBatches: 0,
+      estimatedSecondsRemaining: run.files.length * EST_SECONDS_PER_SLICE + EST_SECONDS_FOR_SUMMARY
+    }
+  });
 
-  const sliceInputs = await buildSliceInputs(run);
+  const sliceInputs = await buildSliceInputs(run, workspaceName);
   if (!sliceInputs.length) throw new Error("No chart slices could be created from the uploaded screenshots");
 
   const promptText = promptOverride || DEFAULT_ANALYSIS_PROMPT;
   const batches = chunkArray(sliceInputs, MAX_IMAGES_PER_BATCH);
+  const totalSlices = sliceInputs.length;
+  let processedSlices = 0;
 
   const collectedNumericRows = [];
   const collectedTextRows = [];
@@ -400,7 +556,31 @@ async function analyzeRunWithOpenAI({ workspaceName, runId, promptOverride }) {
       batch: batches[i],
       promptText,
       batchIndex: i + 1,
-      batchCount: batches.length
+      batchCount: batches.length,
+      run,
+      workspaceName,
+      processedSlicesBeforeBatch: processedSlices,
+      totalSlices
+    });
+
+    processedSlices += batches[i].length;
+    updateRunProgress({
+      workspaceName,
+      runId,
+      progress: {
+        phase: "extracting",
+        message: `Finished batch ${i + 1} of ${batches.length}`,
+        currentFileName: batches[i][batches[i].length - 1]?.sourceFile || null,
+        currentFileIndex: batches[i][batches[i].length - 1]?.fileIndex || 0,
+        totalFiles: run.files.length,
+        currentSliceIndex: batches[i][batches[i].length - 1]?.sliceIndex || 0,
+        totalSlicesForFile: batches[i][batches[i].length - 1]?.totalSlicesForFile || 0,
+        processedSlices,
+        totalSlices,
+        currentBatchIndex: i + 1,
+        totalBatches: batches.length,
+        estimatedSecondsRemaining: buildEstimatedSeconds(totalSlices, processedSlices, batches.length, "extracting")
+      }
     });
 
     collectedNumericRows.push(...ensureArray(partial.numeric_rows));
@@ -433,7 +613,8 @@ async function analyzeRunWithOpenAI({ workspaceName, runId, promptOverride }) {
     run,
     numericRows: dedupedNumericRows,
     textRows: dedupedTextRows,
-    promptText
+    promptText,
+    workspaceName
   });
 
   const finalPayload = {
