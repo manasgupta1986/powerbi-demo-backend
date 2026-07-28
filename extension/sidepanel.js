@@ -1,24 +1,5 @@
-const STORAGE_KEY = "dm_analyst_console_v3";
+const STORAGE_KEY = "dm_analyst_console_v4";
 const POLL_INTERVAL_MS = 3000;
-
-const DEFAULT_PROMPT = `Analyze these tagged dashboard screenshots.
-
-Important: the backend will slice tall screenshots into smaller chart blocks automatically.
-Treat each slice as part of the same original screenshot.
-
-For each visible chart block:
-- identify numerical values directly from labels when visible
-- if exact values are not printed, estimate them from axis scale, segment height, total bar height, and legend colors
-- keep page, filter type, filter value, and source file metadata attached
-- note uncertainty clearly instead of inventing precision
-- avoid duplicate extraction if overlapping slices show the same chart
-
-Then produce:
-1. a structured extracted dataset
-2. a concise executive summary
-3. key findings
-4. recommendations
-5. data-quality notes`.trim();
 
 const FILTER_VALUE_OPTIONS = {
   Zone: ["East", "North", "South", "West"],
@@ -28,30 +9,23 @@ const FILTER_VALUE_OPTIONS = {
   "Age Band": ["Below 18", "18-24", "25-35", "35-44", "45-54", "55+"]
 };
 
+const PAGE_OPTIONS = ["Traffic Engagement", "Purchase Matrix", "Purchase Funnel"];
+
 const state = {
   settings: {
     backendUrl: "https://powerbi-demo-backend.onrender.com",
-    workspaceName: "default-workspace",
-    clientName: "",
-    operatorName: "",
-    defaultPage: "Traffic Engagement",
-    defaultFilterType: "Zone",
-    promptOverride: DEFAULT_PROMPT,
-    promptCollapsed: false
+    clientName: ""
   },
   activeTab: "tab-collect",
   queue: [],
   carouselIndex: 0,
-  currentRunId: null,
-  selectedReportRunId: null,
-  selectedChatRunId: null,
+  runHistory: [],
+  selectedRunId: null,
   latestStatus: null,
   latestReportPayload: null,
-  runHistory: [],
   chatByRun: {},
-  uploadInProgress: false,
-  analysisInProgress: false,
-  pollTimer: null
+  pollTimer: null,
+  analysisInProgress: false
 };
 
 const els = {};
@@ -64,9 +38,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   renderAll();
   await checkBackend();
   await refreshRunHistory();
-  autoPickRunReferences();
-  await refreshAnalysisStatusSilently();
-  await refreshReportForSelectedRun();
+  await refreshStatusForSelectedRun(false);
+  await refreshReportForSelectedRun(false);
   renderAll();
 });
 
@@ -75,25 +48,20 @@ function cacheDom() {
     backendStatus: byId("backendStatus"),
     workspaceBadge: byId("workspaceBadge"),
     backendUrl: byId("backendUrl"),
-    workspaceName: byId("workspaceName"),
     clientName: byId("clientName"),
-    operatorName: byId("operatorName"),
     saveSettingsBtn: byId("saveSettingsBtn"),
     checkBackendBtn: byId("checkBackendBtn"),
 
-    currentRunStatus: byId("currentRunStatus"),
-    currentRunSummary: byId("currentRunSummary"),
-    startNewRunBtn: byId("startNewRunBtn"),
-    continueLatestBtn: byId("continueLatestBtn"),
+    runSelector: byId("runSelector"),
+    refreshRunsBtn: byId("refreshRunsBtn"),
+    selectedRunStatus: byId("selectedRunStatus"),
+    selectedRunMeta: byId("selectedRunMeta"),
 
     queueCount: byId("queueCount"),
-    defaultPage: byId("defaultPage"),
-    defaultFilterType: byId("defaultFilterType"),
     addScreenshotsBtn: byId("addScreenshotsBtn"),
     fileInput: byId("fileInput"),
     clearQueueBtn: byId("clearQueueBtn"),
-    uploadBatchBtn: byId("uploadBatchBtn"),
-    analyzeBatchBtn: byId("analyzeBatchBtn"),
+    analyzeNowBtn: byId("analyzeNowBtn"),
     carouselEmpty: byId("carouselEmpty"),
     carouselPanel: byId("carouselPanel"),
     prevItemBtn: byId("prevItemBtn"),
@@ -102,23 +70,13 @@ function cacheDom() {
     carouselCard: byId("carouselCard"),
     carouselThumbs: byId("carouselThumbs"),
 
-    togglePromptBtn: byId("togglePromptBtn"),
-    promptArea: byId("promptArea"),
-    promptOverride: byId("promptOverride"),
-    resetPromptBtn: byId("resetPromptBtn"),
-    copyPromptBtn: byId("copyPromptBtn"),
-
     analysisStatus: byId("analysisStatus"),
     analysisProgress: byId("analysisProgress"),
     refreshStatusBtn: byId("refreshStatusBtn"),
     retryAnalysisBtn: byId("retryAnalysisBtn"),
 
-    historyList: byId("historyList"),
-    refreshHistoryBtn: byId("refreshHistoryBtn"),
-
     reportStatus: byId("reportStatus"),
     reportReference: byId("reportReference"),
-    useLatestReportBtn: byId("useLatestReportBtn"),
     refreshReportBtn: byId("refreshReportBtn"),
     openReportLink: byId("openReportLink"),
     reportContainer: byId("reportContainer"),
@@ -136,47 +94,32 @@ function bindEvents() {
   document.querySelectorAll(".tab-btn").forEach((btn) => {
     btn.addEventListener("click", async () => {
       setActiveTab(btn.dataset.tab);
-      if (btn.dataset.tab === "tab-report") await refreshReportForSelectedRun();
+      if (btn.dataset.tab === "tab-report") await refreshReportForSelectedRun(false);
       if (btn.dataset.tab === "tab-ask") renderChatArea();
     });
   });
 
-  els.saveSettingsBtn.addEventListener("click", async () => {
-    syncSettingsFromDom();
+  els.saveSettingsBtn.addEventListener("click", saveSettingsFromControls);
+  els.checkBackendBtn.addEventListener("click", checkBackend);
+  els.refreshRunsBtn.addEventListener("click", refreshRunHistory);
+  els.runSelector.addEventListener("change", async () => {
+    state.selectedRunId = els.runSelector.value || null;
     await persistState();
-    updateWorkspaceBadge();
-    toast("Settings saved");
+    await refreshStatusForSelectedRun(false);
+    await refreshReportForSelectedRun(false);
+    renderAll();
   });
 
-  els.checkBackendBtn.addEventListener("click", checkBackend);
-  els.startNewRunBtn.addEventListener("click", startNewRun);
-  els.continueLatestBtn.addEventListener("click", continueLatestRun);
   els.addScreenshotsBtn.addEventListener("click", () => els.fileInput.click());
   els.fileInput.addEventListener("change", handleFilesSelected);
   els.clearQueueBtn.addEventListener("click", clearQueue);
-  els.uploadBatchBtn.addEventListener("click", uploadCurrentBatch);
-  els.analyzeBatchBtn.addEventListener("click", doneAddingAnalyzeBatch);
+  els.analyzeNowBtn.addEventListener("click", analyzeScreenshots);
   els.prevItemBtn.addEventListener("click", () => moveCarousel(-1));
   els.nextItemBtn.addEventListener("click", () => moveCarousel(1));
 
-  els.defaultPage.addEventListener("change", saveSettingsFromControls);
-  els.defaultFilterType.addEventListener("change", saveSettingsFromControls);
-  els.promptOverride.addEventListener("change", saveSettingsFromControls);
-
-  els.togglePromptBtn.addEventListener("click", togglePromptArea);
-  els.resetPromptBtn.addEventListener("click", resetPrompt);
-  els.copyPromptBtn.addEventListener("click", copyPrompt);
-
-  els.refreshStatusBtn.addEventListener("click", refreshAnalysisStatus);
+  els.refreshStatusBtn.addEventListener("click", () => refreshStatusForSelectedRun(true));
   els.retryAnalysisBtn.addEventListener("click", retryAnalysis);
-  els.refreshHistoryBtn.addEventListener("click", refreshRunHistory);
-
-  els.useLatestReportBtn.addEventListener("click", async () => {
-    autoPickRunReferences(true);
-    await refreshReportForSelectedRun();
-    renderAll();
-  });
-  els.refreshReportBtn.addEventListener("click", refreshReportForSelectedRun);
+  els.refreshReportBtn.addEventListener("click", () => refreshReportForSelectedRun(true));
 
   els.sendChatBtn.addEventListener("click", sendChatMessage);
   els.clearChatBtn.addEventListener("click", clearChatForSelectedRun);
@@ -193,9 +136,7 @@ async function loadState() {
   state.activeTab = data.activeTab || state.activeTab;
   state.queue = Array.isArray(data.queue) ? data.queue : [];
   state.carouselIndex = Number.isFinite(data.carouselIndex) ? data.carouselIndex : 0;
-  state.currentRunId = data.currentRunId || null;
-  state.selectedReportRunId = data.selectedReportRunId || null;
-  state.selectedChatRunId = data.selectedChatRunId || null;
+  state.selectedRunId = data.selectedRunId || null;
   state.chatByRun = data.chatByRun || {};
 }
 
@@ -206,9 +147,7 @@ async function persistState() {
       activeTab: state.activeTab,
       queue: state.queue,
       carouselIndex: state.carouselIndex,
-      currentRunId: state.currentRunId,
-      selectedReportRunId: state.selectedReportRunId,
-      selectedChatRunId: state.selectedChatRunId,
+      selectedRunId: state.selectedRunId,
       chatByRun: state.chatByRun
     }
   });
@@ -216,37 +155,22 @@ async function persistState() {
 
 function applyStateToDom() {
   els.backendUrl.value = state.settings.backendUrl;
-  els.workspaceName.value = state.settings.workspaceName;
   els.clientName.value = state.settings.clientName;
-  els.operatorName.value = state.settings.operatorName;
-  els.defaultPage.value = state.settings.defaultPage;
-  els.defaultFilterType.value = state.settings.defaultFilterType;
-  els.promptOverride.value = state.settings.promptOverride;
   setActiveTab(state.activeTab, false);
   updateWorkspaceBadge();
-
-  if (state.settings.promptCollapsed) {
-    els.promptArea.classList.add("hidden");
-    els.togglePromptBtn.textContent = "Expand";
-  } else {
-    els.promptArea.classList.remove("hidden");
-    els.togglePromptBtn.textContent = "Collapse";
-  }
 }
 
 function syncSettingsFromDom() {
   state.settings.backendUrl = sanitizeUrl(els.backendUrl.value);
-  state.settings.workspaceName = els.workspaceName.value.trim() || "default-workspace";
   state.settings.clientName = els.clientName.value.trim();
-  state.settings.operatorName = els.operatorName.value.trim();
-  state.settings.defaultPage = els.defaultPage.value;
-  state.settings.defaultFilterType = els.defaultFilterType.value;
-  state.settings.promptOverride = els.promptOverride.value.trim() || DEFAULT_PROMPT;
 }
 
 async function saveSettingsFromControls() {
   syncSettingsFromDom();
   await persistState();
+  updateWorkspaceBadge();
+  toast("Settings saved");
+  await refreshRunHistory();
 }
 
 function setActiveTab(tabId, persist = true) {
@@ -256,16 +180,27 @@ function setActiveTab(tabId, persist = true) {
   if (persist) persistState();
 }
 
+function workspaceName() {
+  const raw = state.settings.clientName || "default-workspace";
+  return raw.trim() || "default-workspace";
+}
+
 function updateWorkspaceBadge() {
-  els.workspaceBadge.textContent = `Workspace: ${state.settings.workspaceName || "default-workspace"}`;
+  els.workspaceBadge.textContent = state.settings.clientName
+    ? `Client: ${state.settings.clientName}`
+    : "No client selected";
+}
+
+function selectedRun() {
+  return state.runHistory.find((run) => run.runId === state.selectedRunId) || null;
 }
 
 function renderAll() {
   updateWorkspaceBadge();
-  renderCurrentRunCard();
+  renderRunSelector();
+  renderSelectedRunCard();
   renderQueue();
   renderAnalysisStatus();
-  renderHistory();
   renderReport();
   renderChatArea();
 }
@@ -285,68 +220,73 @@ async function checkBackend() {
   }
 }
 
-async function startNewRun() {
+async function refreshRunHistory(showToast = false) {
   try {
     syncSettingsFromDom();
     await ensureBackendReady();
-    const data = await apiPost("/analyst/upload/start", {
-      workspaceName: state.settings.workspaceName,
-      clientName: state.settings.clientName,
-      operatorName: state.settings.operatorName
-    });
-    state.currentRunId = data.runId;
-    state.selectedReportRunId = data.runId;
-    state.selectedChatRunId = data.runId;
-    state.latestStatus = null;
-    state.latestReportPayload = null;
-    state.queue = [];
-    state.carouselIndex = 0;
+    const data = await apiGet(`/analyst/report/history?workspaceName=${encodeURIComponent(workspaceName())}`);
+    state.runHistory = Array.isArray(data.runs) ? data.runs : [];
+    if (!state.selectedRunId && state.runHistory.length) state.selectedRunId = state.runHistory[0].runId;
+    if (state.selectedRunId && !state.runHistory.find((run) => run.runId === state.selectedRunId)) {
+      state.selectedRunId = state.runHistory[0]?.runId || null;
+    }
     await persistState();
-    renderAll();
-    toast(`Run started: ${data.runId}`);
-    await refreshRunHistory();
+    renderRunSelector();
+    renderSelectedRunCard();
+    if (showToast) toast("Runs refreshed");
   } catch (error) {
-    toast(error.message || "Failed to start new run");
+    toast(error.message || "Failed to refresh runs");
   }
 }
 
-async function continueLatestRun() {
-  try {
-    syncSettingsFromDom();
-    await ensureBackendReady();
-    const data = await apiGet(`/analyst/upload/latest?workspaceName=${encodeURIComponent(state.settings.workspaceName)}`);
-    if (!data?.latest?.runId) throw new Error("No latest run found for this workspace");
-    state.currentRunId = data.latest.runId;
-    state.selectedReportRunId = data.latest.runId;
-    state.selectedChatRunId = data.latest.runId;
-    await persistState();
-    await refreshAnalysisStatusSilently();
-    await refreshReportForSelectedRun();
-    renderAll();
-    toast(`Using latest run: ${data.latest.runId}`);
-  } catch (error) {
-    toast(error.message || "Failed to load latest run");
+function renderRunSelector() {
+  const options = state.runHistory.length
+    ? state.runHistory.map((run) => `<option value="${escapeAttr(run.runId)}" ${run.runId === state.selectedRunId ? "selected" : ""}>${escapeHtml(formatRunLabel(run))}</option>`).join("")
+    : `<option value="">No saved runs</option>`;
+  els.runSelector.innerHTML = options;
+}
+
+function renderSelectedRunCard() {
+  const run = selectedRun();
+  if (!run) {
+    setPill(els.selectedRunStatus, "No run", "muted");
+    els.selectedRunMeta.textContent = "The selected run will be used by Current, Report, and Ask.";
+    return;
   }
+
+  const tone = run.status === "completed"
+    ? (run.hasUsableData ? "success" : "danger")
+    : run.status === "failed"
+      ? "danger"
+      : ["queued", "extracting", "collecting", "upload_complete", "started"].includes(run.status)
+        ? "warning"
+        : "muted";
+  const label = run.status === "completed"
+    ? (run.hasUsableData ? "Ready" : "Needs review")
+    : capitalize(run.status || "in progress");
+  setPill(els.selectedRunStatus, label, tone);
+
+  els.selectedRunMeta.innerHTML = `
+    <div><strong>Date and time:</strong> ${escapeHtml(formatDateTime(run.finishedAt || run.createdAt))}</div>
+    <div><strong>Files:</strong> ${Number(run.fileCount || 0)} · <strong>Numeric rows:</strong> ${Number(run.numericRowCount || 0)} · <strong>Text rows:</strong> ${Number(run.textRowCount || 0)}</div>
+    <div><strong>Default target:</strong> This selected run is now used for status, report, and chat.</div>
+  `;
 }
 
 async function handleFilesSelected(event) {
   const files = Array.from(event.target.files || []);
   if (!files.length) return;
-  const readFiles = await Promise.all(files.map(readFileAsDataUrl));
-  const defaults = {
-    page: state.settings.defaultPage,
-    filterType: state.settings.defaultFilterType
-  };
 
+  const readFiles = await Promise.all(files.map(readFileAsDataUrl));
   readFiles.forEach(({ file, dataUrl }) => {
-    const inferred = inferTagsFromFilename(file.name, defaults.filterType);
+    const inferred = inferTagsFromFilename(file.name);
     state.queue.push({
       id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       fileName: file.name,
       dataUrl,
-      page: inferred.page || defaults.page,
-      filterType: inferred.filterType || defaults.filterType,
-      filterValue: inferred.filterValue || firstFilterValue(defaults.filterType),
+      page: inferred.page,
+      filterType: inferred.filterType,
+      filterValue: inferred.filterValue,
       note: ""
     });
   });
@@ -356,6 +296,70 @@ async function handleFilesSelected(event) {
   await persistState();
   renderQueue();
   toast(`${readFiles.length} screenshot(s) added`);
+}
+
+function inferTagsFromFilename(fileName) {
+  const normalized = normalizeFileName(fileName);
+
+  let page = "Traffic Engagement";
+  if (/\bpurchase\s+matrix\b/.test(normalized)) page = "Purchase Matrix";
+  else if (/\bpurchase\s+funnel\b/.test(normalized)) page = "Purchase Funnel";
+  else if (/\btraffic\s+engagement\b/.test(normalized)) page = "Traffic Engagement";
+
+  let filterType = "Zone";
+  if (/\bzone\b/.test(normalized)) filterType = "Zone";
+  else if (/\bnccs\b/.test(normalized)) filterType = "NCCS";
+  else if (/\btier\b/.test(normalized)) filterType = "Tier";
+  else if (/\bgender\b/.test(normalized)) filterType = "Gender";
+  else if (/\bage\s*band\b/.test(normalized) || /\bage\b/.test(normalized)) filterType = "Age Band";
+
+  const filterValue = inferFilterValue(normalized, filterType);
+  return { page, filterType, filterValue };
+}
+
+function normalizeFileName(fileName) {
+  return String(fileName || "")
+    .toLowerCase()
+    .replace(/\.[a-z0-9]+$/i, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function inferFilterValue(normalized, filterType) {
+  if (filterType === "Zone") {
+    if (/\beast\b/.test(normalized)) return "East";
+    if (/\bnorth\b/.test(normalized)) return "North";
+    if (/\bsouth\b/.test(normalized)) return "South";
+    if (/\bwest\b/.test(normalized)) return "West";
+  }
+
+  if (filterType === "NCCS") {
+    if (/\bnccs\s*a\b|\ba\b/.test(normalized)) return "A";
+    if (/\bnccs\s*b\b|\bb\b/.test(normalized)) return "B";
+  }
+
+  if (filterType === "Tier") {
+    if (/\btier\s*1\b/.test(normalized)) return "Tier 1";
+    if (/\btier\s*2\b/.test(normalized)) return "Tier 2";
+    if (/\btier\s*3\b|\blower\b/.test(normalized)) return "Tier 3 & lower";
+  }
+
+  if (filterType === "Gender") {
+    if (/\bmale\b/.test(normalized)) return "Male";
+    if (/\bfemale\b/.test(normalized)) return "Female";
+  }
+
+  if (filterType === "Age Band") {
+    if (/\bbelow\s*18\b|\bunder\s*18\b/.test(normalized)) return "Below 18";
+    if (/\b18\s*24\b|\b18\s*to\s*24\b|\b18-24\b/.test(normalized)) return "18-24";
+    if (/\b25\s*35\b|\b25\s*to\s*35\b|\b25-35\b/.test(normalized)) return "25-35";
+    if (/\b35\s*44\b|\b35\s*to\s*44\b|\b35-44\b/.test(normalized)) return "35-44";
+    if (/\b45\s*54\b|\b45\s*to\s*54\b|\b45-54\b/.test(normalized)) return "45-54";
+    if (/\b55\+\b|\b55\s*plus\b/.test(normalized)) return "55+";
+  }
+
+  return FILTER_VALUE_OPTIONS[filterType]?.[0] || "";
 }
 
 function clearQueue() {
@@ -389,21 +393,20 @@ function renderQueue() {
 
   const item = state.queue[state.carouselIndex];
   els.carouselCounter.textContent = `${state.carouselIndex + 1} of ${state.queue.length}`;
-  els.carouselCard.innerHTML = createQueueCardHtml(item, state.carouselIndex);
+  els.carouselCard.innerHTML = createQueueCardHtml(item);
   els.carouselThumbs.innerHTML = state.queue.map((queueItem, index) => `
     <button class="thumb ${index === state.carouselIndex ? "active" : ""}" data-queue-index="${index}">
       <div>${escapeHtml(shorten(queueItem.fileName, 18))}</div>
-      <div>${escapeHtml(queueItem.filterValue || "Unlabeled")}</div>
+      <div>${escapeHtml(queueItem.filterType)} · ${escapeHtml(queueItem.filterValue)}</div>
     </button>
   `).join("");
 
   els.carouselCard.querySelectorAll("[data-field]").forEach((input) => {
     input.addEventListener("change", async (event) => {
       const field = event.target.dataset.field;
-      const value = event.target.value;
-      state.queue[state.carouselIndex][field] = value;
+      state.queue[state.carouselIndex][field] = event.target.value;
       if (field === "filterType") {
-        state.queue[state.carouselIndex].filterValue = firstFilterValue(value);
+        state.queue[state.carouselIndex].filterValue = FILTER_VALUE_OPTIONS[event.target.value]?.[0] || "";
       }
       await persistState();
       renderQueue();
@@ -430,15 +433,15 @@ function renderQueue() {
 }
 
 function createQueueCardHtml(item) {
+  const pageOptions = PAGE_OPTIONS.map((option) => `<option value="${escapeAttr(option)}" ${option === item.page ? "selected" : ""}>${escapeHtml(option)}</option>`).join("");
   const filterTypeOptions = Object.keys(FILTER_VALUE_OPTIONS).map((option) => `<option value="${escapeAttr(option)}" ${option === item.filterType ? "selected" : ""}>${escapeHtml(option)}</option>`).join("");
   const filterValueOptions = (FILTER_VALUE_OPTIONS[item.filterType] || []).map((option) => `<option value="${escapeAttr(option)}" ${option === item.filterValue ? "selected" : ""}>${escapeHtml(option)}</option>`).join("");
-  const pageOptions = ["Traffic Engagement", "Purchase Matrix", "Purchase Funnel"].map((option) => `<option value="${escapeAttr(option)}" ${option === item.page ? "selected" : ""}>${escapeHtml(option)}</option>`).join("");
 
   return `
     <div class="queue-top">
       <div>
         <div class="queue-name">${escapeHtml(item.fileName)}</div>
-        <div class="queue-subtext">Review this screenshot, confirm tags, then move to the next one.</div>
+        <div class="queue-subtext">Tags are auto-filled from the filename. Adjust only if needed.</div>
       </div>
       <button class="btn btn-secondary" data-action="delete-queue-item">Remove</button>
     </div>
@@ -448,33 +451,39 @@ function createQueueCardHtml(item) {
       <label><span>Filter type</span><select data-field="filterType">${filterTypeOptions}</select></label>
       <label><span>Filter value</span><select data-field="filterValue">${filterValueOptions}</select></label>
     </div>
-    <label><span>Note</span><textarea data-field="note" rows="3" placeholder="Optional note about what this screenshot contains">${escapeHtml(item.note || "")}</textarea></label>
+    <label><span>Note</span><textarea data-field="note" rows="3" placeholder="Optional context for this screenshot">${escapeHtml(item.note || "")}</textarea></label>
   `;
 }
 
-async function uploadCurrentBatch() {
+async function analyzeScreenshots() {
   try {
-    if (!state.queue.length) throw new Error("Add screenshots before uploading");
     syncSettingsFromDom();
     await ensureBackendReady();
-    if (!state.currentRunId) {
-      const start = await apiPost("/analyst/upload/start", {
-        workspaceName: state.settings.workspaceName,
-        clientName: state.settings.clientName,
-        operatorName: state.settings.operatorName
-      });
-      state.currentRunId = start.runId;
-    }
+    if (!state.settings.clientName) throw new Error("Enter the client/platform name first");
+    if (!state.queue.length) throw new Error("Add screenshots before analysis");
 
-    state.uploadInProgress = true;
-    renderCurrentRunCard();
+    const start = await apiPost("/analyst/upload/start", {
+      workspaceName: workspaceName(),
+      clientName: state.settings.clientName,
+      operatorName: ""
+    });
+
+    const runId = start.runId;
+    state.selectedRunId = runId;
+    state.latestStatus = null;
+    renderSelectedRunCard();
 
     for (let i = 0; i < state.queue.length; i += 1) {
       const item = state.queue[i];
-      els.currentRunSummary.innerHTML = `Uploading ${i + 1} of ${state.queue.length}: <strong>${escapeHtml(item.fileName)}</strong>`;
+      setPill(els.analysisStatus, "Uploading", "warning");
+      els.analysisProgress.innerHTML = `
+        <div><strong>Status:</strong> Uploading screenshots</div>
+        <div><strong>Current file:</strong> ${escapeHtml(item.fileName)}</div>
+        <div><strong>Progress:</strong> ${i + 1} of ${state.queue.length}</div>
+      `;
       await apiPost("/analyst/upload/file", {
-        workspaceName: state.settings.workspaceName,
-        runId: state.currentRunId,
+        workspaceName: workspaceName(),
+        runId,
         fileName: item.fileName,
         page: item.page,
         filterType: item.filterType,
@@ -485,50 +494,50 @@ async function uploadCurrentBatch() {
     }
 
     await apiPost("/analyst/upload/finish", {
-      workspaceName: state.settings.workspaceName,
-      runId: state.currentRunId
+      workspaceName: workspaceName(),
+      runId
     });
 
     state.queue = [];
     state.carouselIndex = 0;
     await persistState();
-    await refreshRunHistory();
-    renderAll();
-    toast("Batch uploaded successfully");
-  } catch (error) {
-    toast(error.message || "Batch upload failed");
-  } finally {
-    state.uploadInProgress = false;
-    renderCurrentRunCard();
     renderQueue();
+
+    await apiPost("/analyst/analyze/start", {
+      workspaceName: workspaceName(),
+      runId
+    });
+
+    await refreshRunHistory();
+    beginPolling();
+    await refreshStatusForSelectedRun(false);
+    toast("Analysis started");
+  } catch (error) {
+    toast(error.message || "Failed to analyze screenshots");
   }
 }
 
-async function doneAddingAnalyzeBatch() {
+async function retryAnalysis() {
   try {
-    if (state.queue.length) await uploadCurrentBatch();
-    if (!state.currentRunId) throw new Error("Start or continue a run first");
     syncSettingsFromDom();
-    const data = await apiPost("/analyst/analyze/start", {
-      workspaceName: state.settings.workspaceName,
-      runId: state.currentRunId,
-      promptOverride: state.settings.promptOverride
+    await ensureBackendReady();
+    if (!state.selectedRunId) throw new Error("Select a run first");
+    await apiPost("/analyst/analyze/start", {
+      workspaceName: workspaceName(),
+      runId: state.selectedRunId
     });
-    state.analysisInProgress = true;
-    state.latestStatus = data;
-    await persistState();
-    renderAnalysisStatus();
     beginPolling();
-    toast("Analysis started");
+    await refreshStatusForSelectedRun(false);
+    toast("Analysis retried");
   } catch (error) {
-    toast(error.message || "Failed to start analysis");
+    toast(error.message || "Retry failed");
   }
 }
 
 function beginPolling() {
   stopPolling();
   state.pollTimer = setInterval(async () => {
-    await refreshAnalysisStatusSilently();
+    await refreshStatusForSelectedRun(false);
   }, POLL_INTERVAL_MS);
 }
 
@@ -537,204 +546,112 @@ function stopPolling() {
   state.pollTimer = null;
 }
 
-async function refreshAnalysisStatus() {
-  await refreshAnalysisStatusSilently(true);
-}
-
-async function refreshAnalysisStatusSilently(showToast = false) {
+async function refreshStatusForSelectedRun(showToast) {
   try {
-    if (!state.currentRunId) return;
-    const data = await apiGet(`/analyst/analyze/status?workspaceName=${encodeURIComponent(state.settings.workspaceName)}&runId=${encodeURIComponent(state.currentRunId)}`);
-    state.latestStatus = data;
-    state.analysisInProgress = ["queued", "extracting"].includes(data.status);
-    if (!state.analysisInProgress) stopPolling();
-    if (data.status === "completed") {
-      await refreshRunHistory();
-      if (data.hasUsableData) {
-        state.selectedReportRunId = state.currentRunId;
-        state.selectedChatRunId = state.currentRunId;
-        await refreshReportForSelectedRun();
-      }
+    if (!state.selectedRunId) {
+      state.latestStatus = null;
+      state.analysisInProgress = false;
+      renderAnalysisStatus();
+      return;
     }
-    await persistState();
-    renderAnalysisStatus();
-    renderCurrentRunCard();
-    renderHistory();
-    if (showToast) toast(`Status: ${data.status}`);
+
+    const data = await apiGet(`/analyst/analyze/status?workspaceName=${encodeURIComponent(workspaceName())}&runId=${encodeURIComponent(state.selectedRunId)}`);
+    state.latestStatus = data;
+    state.analysisInProgress = ["queued", "extracting", "collecting", "upload_complete", "started"].includes(data.status);
+
+    if (state.analysisInProgress) beginPolling();
+    else stopPolling();
+
+    await refreshRunHistory();
+    if (data.status === "completed") await refreshReportForSelectedRun(false);
+    renderAll();
+    if (showToast) toast(`Status updated: ${data.status}`);
   } catch (error) {
     if (showToast) toast(error.message || "Failed to refresh status");
   }
 }
 
-async function retryAnalysis() {
-  if (!state.currentRunId) return toast("No current run selected");
-  await doneAddingAnalyzeBatch();
-}
-
-function renderCurrentRunCard() {
-  const runId = state.currentRunId || "No run";
-  let label = "No run";
-  let tone = "muted";
-  if (state.uploadInProgress) {
-    label = "Uploading";
-    tone = "warning";
-  } else if (state.analysisInProgress) {
-    label = "Analyzing";
-    tone = "warning";
-  } else if (state.latestStatus?.status === "completed" && state.latestStatus?.hasUsableData) {
-    label = "Ready";
-    tone = "success";
-  } else if (state.latestStatus?.status === "completed" && !state.latestStatus?.hasUsableData) {
-    label = "Needs review";
-    tone = "danger";
-  } else if (state.latestStatus?.status === "failed") {
-    label = "Failed";
-    tone = "danger";
-  } else if (state.currentRunId) {
-    label = "In progress";
-    tone = "muted";
-  }
-  setPill(els.currentRunStatus, label, tone);
-
-  const latestCompleted = latestCompletedRun();
-  els.currentRunSummary.innerHTML = `
-    <div><strong>Run ID:</strong> ${escapeHtml(runId)}</div>
-    <div><strong>Workspace:</strong> ${escapeHtml(state.settings.workspaceName)}</div>
-    <div><strong>Latest completed usable run:</strong> ${escapeHtml(latestCompleted ? `${latestCompleted.runId} · ${formatDateTime(latestCompleted.finishedAt || latestCompleted.createdAt)}` : "None yet")}</div>
-  `;
-}
-
 function renderAnalysisStatus() {
   const status = state.latestStatus?.status || "idle";
+  const progress = state.latestStatus?.progress || null;
   const label = status === "completed"
-    ? (state.latestStatus?.hasUsableData ? "Usable" : "Needs review")
-    : status.charAt(0).toUpperCase() + status.slice(1);
+    ? (state.latestStatus?.hasUsableData ? "Ready" : "Needs review")
+    : capitalize(status);
   const tone = status === "completed"
     ? (state.latestStatus?.hasUsableData ? "success" : "danger")
-    : status === "failed" ? "danger" : ["queued", "extracting"].includes(status) ? "warning" : "muted";
+    : status === "failed"
+      ? "danger"
+      : ["queued", "extracting", "collecting", "upload_complete", "started"].includes(status)
+        ? "warning"
+        : "muted";
   setPill(els.analysisStatus, label, tone);
+
+  if (!state.selectedRunId) {
+    els.analysisProgress.textContent = "No run selected yet.";
+    return;
+  }
 
   if (!state.latestStatus) {
     els.analysisProgress.textContent = "No analysis started yet.";
     return;
   }
 
-  const blocks = [
-    `<div><strong>Status:</strong> ${escapeHtml(state.latestStatus.status || "unknown")}</div>`,
-    `<div><strong>Numeric rows:</strong> ${Number(state.latestStatus.numericRowCount || 0)}</div>`,
-    `<div><strong>Text rows:</strong> ${Number(state.latestStatus.textRowCount || 0)}</div>`,
-    `<div><strong>Has usable data:</strong> ${state.latestStatus.hasUsableData ? "Yes" : "No"}</div>`
-  ];
-  if (state.latestStatus.error) blocks.push(`<div><strong>Error:</strong> ${escapeHtml(state.latestStatus.error)}</div>`);
-  if (state.latestStatus.status === "completed" && !state.latestStatus.hasUsableData) {
-    blocks.push(`<div><strong>Hard check:</strong> The run finished technically, but report/chat are blocked because no usable extracted data was found. Retry after improving screenshot clarity or slicing settings.</div>`);
-  }
-  els.analysisProgress.innerHTML = blocks.join("");
+  const estimated = formatEta(progress?.estimatedSecondsRemaining);
+  els.analysisProgress.innerHTML = `
+    <div><strong>Actual status:</strong> ${escapeHtml(progress?.phase || status)}</div>
+    <div><strong>What is happening:</strong> ${escapeHtml(progress?.message || "Waiting")}</div>
+    <div class="progress-grid">
+      <div class="progress-item"><div class="progress-label">Estimated time remaining</div><div class="progress-value">${escapeHtml(estimated)}</div></div>
+      <div class="progress-item"><div class="progress-label">Current file</div><div class="progress-value">${escapeHtml(progress?.currentFileName || "—")}</div></div>
+      <div class="progress-item"><div class="progress-label">File progress</div><div class="progress-value">${escapeHtml(formatRatio(progress?.currentFileIndex, progress?.totalFiles))}</div></div>
+      <div class="progress-item"><div class="progress-label">Slice progress</div><div class="progress-value">${escapeHtml(formatRatio(progress?.currentSliceIndex, progress?.totalSlicesForFile))}</div></div>
+      <div class="progress-item"><div class="progress-label">Processed slices</div><div class="progress-value">${escapeHtml(formatRatio(progress?.processedSlices, progress?.totalSlices))}</div></div>
+      <div class="progress-item"><div class="progress-label">Batch progress</div><div class="progress-value">${escapeHtml(formatRatio(progress?.currentBatchIndex, progress?.totalBatches))}</div></div>
+    </div>
+    <div style="margin-top:10px;"><strong>Usable data:</strong> ${state.latestStatus.hasUsableData ? "Yes" : "No"} · <strong>Numeric rows:</strong> ${Number(state.latestStatus.numericRowCount || 0)} · <strong>Text rows:</strong> ${Number(state.latestStatus.textRowCount || 0)}</div>
+    ${state.latestStatus.error ? `<div style="margin-top:10px;"><strong>Error:</strong> ${escapeHtml(state.latestStatus.error)}</div>` : ""}
+  `;
 }
 
-async function refreshRunHistory() {
+async function refreshReportForSelectedRun(showToast) {
   try {
-    syncSettingsFromDom();
-    await ensureBackendReady();
-    const data = await apiGet(`/analyst/report/history?workspaceName=${encodeURIComponent(state.settings.workspaceName)}`);
-    state.runHistory = Array.isArray(data.runs) ? data.runs : [];
-    autoPickRunReferences();
-    await persistState();
-    renderHistory();
-  } catch (error) {
-    els.historyList.textContent = error.message || "Failed to load run history";
-  }
-}
-
-function renderHistory() {
-  if (!state.runHistory.length) {
-    els.historyList.textContent = "No saved runs yet.";
-    return;
-  }
-
-  els.historyList.innerHTML = state.runHistory.map((run) => {
-    const statusTone = run.status === "completed" ? (run.hasUsableData ? "success" : "danger") : run.status === "failed" ? "danger" : "warning";
-    return `
-      <div class="history-item">
-        <div class="history-top">
-          <div>
-            <div class="history-name">${escapeHtml(run.runId)}</div>
-            <div class="history-subtext">Created ${escapeHtml(formatDateTime(run.createdAt))}</div>
-          </div>
-          <span class="pill pill-${statusTone}">${escapeHtml(run.status)}</span>
-        </div>
-        <div class="badge-row">
-          <span class="badge">Files: ${Number(run.fileCount || 0)}</span>
-          <span class="badge">Numeric: ${Number(run.numericRowCount || 0)}</span>
-          <span class="badge">Text: ${Number(run.textRowCount || 0)}</span>
-          <span class="badge">Usable: ${run.hasUsableData ? "Yes" : "No"}</span>
-        </div>
-        <div class="history-actions">
-          <button class="btn btn-secondary" data-action="use-run" data-run-id="${escapeAttr(run.runId)}">Use as Current</button>
-          <button class="btn btn-secondary" data-action="use-report" data-run-id="${escapeAttr(run.runId)}">Use in Report</button>
-          <button class="btn btn-secondary" data-action="use-chat" data-run-id="${escapeAttr(run.runId)}">Use in Chat</button>
-        </div>
-      </div>
-    `;
-  }).join("");
-
-  els.historyList.querySelectorAll("[data-action]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const runId = button.dataset.runId;
-      const action = button.dataset.action;
-      if (action === "use-run") state.currentRunId = runId;
-      if (action === "use-report") state.selectedReportRunId = runId;
-      if (action === "use-chat") state.selectedChatRunId = runId;
-      await persistState();
-      if (action === "use-run") await refreshAnalysisStatusSilently();
-      if (action === "use-report") await refreshReportForSelectedRun();
-      renderAll();
-    });
-  });
-}
-
-function autoPickRunReferences(force = false) {
-  const usable = state.runHistory.find((run) => run.status === "completed" && run.hasUsableData);
-  const latest = state.runHistory[0] || null;
-  if (force || !state.currentRunId) state.currentRunId = usable?.runId || latest?.runId || null;
-  if (force || !state.selectedReportRunId) state.selectedReportRunId = usable?.runId || latest?.runId || null;
-  if (force || !state.selectedChatRunId) state.selectedChatRunId = usable?.runId || latest?.runId || null;
-}
-
-function latestCompletedRun() {
-  return state.runHistory.find((run) => run.status === "completed" && run.hasUsableData) || null;
-}
-
-async function refreshReportForSelectedRun() {
-  try {
-    syncSettingsFromDom();
-    await ensureBackendReady();
-    const runId = state.selectedReportRunId || latestCompletedRun()?.runId;
-    if (!runId) {
+    if (!state.selectedRunId) {
       state.latestReportPayload = null;
       renderReport();
       return;
     }
-    const data = await apiGet(`/analyst/report/run?workspaceName=${encodeURIComponent(state.settings.workspaceName)}&runId=${encodeURIComponent(runId)}`);
+    const data = await apiGet(`/analyst/report/run?workspaceName=${encodeURIComponent(workspaceName())}&runId=${encodeURIComponent(state.selectedRunId)}`);
     state.latestReportPayload = data?.report || null;
-    state.selectedReportRunId = runId;
-    await persistState();
     renderReport();
+    if (showToast) toast("Report refreshed");
   } catch (error) {
     state.latestReportPayload = null;
-    els.reportContainer.textContent = error.message || "Failed to load report";
+    renderReport();
+    if (showToast) toast(error.message || "Failed to load report");
   }
 }
 
 function renderReport() {
+  const run = selectedRun();
   const report = state.latestReportPayload;
-  const reportRunId = state.selectedReportRunId || "No run selected";
-  els.reportReference.innerHTML = `<div><strong>Run:</strong> ${escapeHtml(reportRunId)}</div>`;
+
+  if (!run) {
+    setPill(els.reportStatus, "No report", "muted");
+    els.reportReference.textContent = "Select a run to view its report.";
+    els.reportContainer.textContent = "No report available yet.";
+    els.openReportLink.href = "#";
+    return;
+  }
+
+  els.reportReference.innerHTML = `
+    <div><strong>Date and time:</strong> ${escapeHtml(formatDateTime(run.finishedAt || run.createdAt))}</div>
+    <div><strong>Client:</strong> ${escapeHtml(state.settings.clientName || workspaceName())}</div>
+  `;
 
   if (!report) {
     setPill(els.reportStatus, "No report", "muted");
     els.reportContainer.textContent = "No report available yet.";
-    els.openReportLink.href = "#";
+    els.openReportLink.href = buildUrl(`/analyst/report/html?workspaceName=${encodeURIComponent(workspaceName())}&runId=${encodeURIComponent(run.runId)}`);
     return;
   }
 
@@ -742,21 +659,16 @@ function renderReport() {
     setPill(els.reportStatus, "Needs review", "danger");
     els.reportContainer.innerHTML = `
       <div class="report-section">
-        <h3>Hard usable-data check</h3>
-        <p class="report-summary">This run finished, but report display is intentionally blocked because the extracted output contains no usable numeric rows, text rows, or summary.</p>
+        <h3>Usable-data check failed</h3>
+        <div class="report-summary">This run finished technically, but there is not enough extracted data yet to support a reliable report.</div>
       </div>
     `;
-    els.openReportLink.href = buildUrl(`/analyst/report/html?workspaceName=${encodeURIComponent(state.settings.workspaceName)}&runId=${encodeURIComponent(reportRunId)}`);
+    els.openReportLink.href = buildUrl(`/analyst/report/html?workspaceName=${encodeURIComponent(workspaceName())}&runId=${encodeURIComponent(run.runId)}`);
     return;
   }
 
   setPill(els.reportStatus, "Ready", "success");
-  els.reportReference.innerHTML = `
-    <div><strong>Run:</strong> ${escapeHtml(report.runId)}</div>
-    <div><strong>Created:</strong> ${escapeHtml(formatDateTime(report.createdAt))}</div>
-    <div><strong>Numeric rows:</strong> ${Number(report.numericRowCount || 0)} · <strong>Text rows:</strong> ${Number(report.textRowCount || 0)}</div>
-  `;
-  els.openReportLink.href = buildUrl(`/analyst/report/html?workspaceName=${encodeURIComponent(state.settings.workspaceName)}&runId=${encodeURIComponent(report.runId)}`);
+  els.openReportLink.href = buildUrl(`/analyst/report/html?workspaceName=${encodeURIComponent(workspaceName())}&runId=${encodeURIComponent(run.runId)}`);
   els.reportContainer.innerHTML = `
     <div class="report-section"><h3>${escapeHtml(report.report?.title || "Analyst Report")}</h3><div class="report-summary">${escapeHtml(report.summary || "")}</div></div>
     ${renderListSection("Executive Summary", report.report?.executive_summary || [])}
@@ -776,32 +688,31 @@ function renderListSection(title, items) {
 }
 
 function renderChatArea() {
-  const selectedRunId = state.selectedChatRunId || latestCompletedRun()?.runId;
-  const run = state.runHistory.find((item) => item.runId === selectedRunId) || null;
-  const messages = state.chatByRun[selectedRunId] || [];
+  const run = selectedRun();
+  const messages = state.chatByRun[state.selectedRunId] || [];
 
-  if (!selectedRunId) {
+  if (!run) {
     setPill(els.chatStatus, "No run selected", "muted");
-    els.chatReference.textContent = "Chat will automatically use the latest completed run unless you select another saved run.";
+    els.chatReference.textContent = "Select a usable run to continue the conversation.";
     els.chatMessages.textContent = "Chat will appear here after a usable analysis is available.";
     return;
   }
 
-  const usable = Boolean(run?.hasUsableData);
+  const usable = Boolean(run.hasUsableData);
   setPill(els.chatStatus, usable ? "Ready" : "Blocked", usable ? "success" : "danger");
   els.chatReference.innerHTML = `
-    <div><strong>Run:</strong> ${escapeHtml(selectedRunId)}</div>
-    <div><strong>Timestamp:</strong> ${escapeHtml(formatDateTime(run?.finishedAt || run?.createdAt))}</div>
-    <div><strong>Status:</strong> ${escapeHtml(run?.status || "unknown")} · <strong>Usable:</strong> ${usable ? "Yes" : "No"}</div>
+    <div><strong>Date and time:</strong> ${escapeHtml(formatDateTime(run.finishedAt || run.createdAt))}</div>
+    <div><strong>Client:</strong> ${escapeHtml(state.settings.clientName || workspaceName())}</div>
+    <div><strong>Status:</strong> ${escapeHtml(run.status || "unknown")} · <strong>Usable:</strong> ${usable ? "Yes" : "No"}</div>
   `;
 
   if (!usable) {
-    els.chatMessages.innerHTML = `<div class="chat-message assistant">This run is blocked for chat because the usable-data check failed. Choose a different run or re-run analysis.</div>`;
+    els.chatMessages.innerHTML = `<div class="chat-message assistant">This run is blocked for chat because the usable-data check failed. Select another run or retry analysis.</div>`;
     return;
   }
 
   if (!messages.length) {
-    els.chatMessages.innerHTML = `<div class="chat-message assistant">Ask about trends, app comparisons, low-confidence estimates, or summary conclusions for this run.</div>`;
+    els.chatMessages.innerHTML = `<div class="chat-message assistant">I’m ready to answer questions about this selected run and continue from the latest saved context.</div>`;
     return;
   }
 
@@ -815,25 +726,24 @@ async function sendChatMessage() {
   try {
     const question = els.chatInput.value.trim();
     if (!question) throw new Error("Type a question first");
-    const runId = state.selectedChatRunId || latestCompletedRun()?.runId;
-    if (!runId) throw new Error("No usable run selected for chat");
-    const run = state.runHistory.find((item) => item.runId === runId);
-    if (!run?.hasUsableData) throw new Error("Selected run failed the usable-data check");
+    const run = selectedRun();
+    if (!run) throw new Error("Select a run first");
+    if (!run.hasUsableData) throw new Error("Selected run failed the usable-data check");
 
-    const messages = state.chatByRun[runId] || [];
+    const messages = state.chatByRun[run.runId] || [];
     messages.push({ role: "user", content: question, createdAt: new Date().toISOString() });
-    state.chatByRun[runId] = messages;
+    state.chatByRun[run.runId] = messages;
     els.chatInput.value = "";
     await persistState();
     renderChatArea();
 
     const data = await apiPost("/analyst/chat", {
-      workspaceName: state.settings.workspaceName,
-      runId,
+      workspaceName: workspaceName(),
+      runId: run.runId,
       question
     });
 
-    state.chatByRun[runId].push({
+    state.chatByRun[run.runId].push({
       role: "assistant",
       content: data.answer || "No answer returned.",
       createdAt: new Date().toISOString()
@@ -846,35 +756,15 @@ async function sendChatMessage() {
 }
 
 function clearChatForSelectedRun() {
-  const runId = state.selectedChatRunId || latestCompletedRun()?.runId;
-  if (!runId) return;
-  state.chatByRun[runId] = [];
+  const run = selectedRun();
+  if (!run) return;
+  state.chatByRun[run.runId] = [];
   persistState();
   renderChatArea();
 }
 
-function togglePromptArea() {
-  state.settings.promptCollapsed = !state.settings.promptCollapsed;
-  if (state.settings.promptCollapsed) {
-    els.promptArea.classList.add("hidden");
-    els.togglePromptBtn.textContent = "Expand";
-  } else {
-    els.promptArea.classList.remove("hidden");
-    els.togglePromptBtn.textContent = "Collapse";
-  }
-  persistState();
-}
-
-async function resetPrompt() {
-  state.settings.promptOverride = DEFAULT_PROMPT;
-  els.promptOverride.value = DEFAULT_PROMPT;
-  await persistState();
-  toast("Prompt reset");
-}
-
-async function copyPrompt() {
-  await navigator.clipboard.writeText(els.promptOverride.value || DEFAULT_PROMPT);
-  toast("Prompt copied");
+function buildUrl(path) {
+  return `${state.settings.backendUrl}${path}`;
 }
 
 async function ensureBackendReady() {
@@ -883,10 +773,6 @@ async function ensureBackendReady() {
 
 function sanitizeUrl(value) {
   return String(value || "").trim().replace(/\/$/, "");
-}
-
-function buildUrl(path) {
-  return `${state.settings.backendUrl}${path}`;
 }
 
 async function apiGet(path) {
@@ -916,25 +802,6 @@ function readFileAsDataUrl(file) {
   });
 }
 
-function inferTagsFromFilename(fileName, defaultFilterType) {
-  const raw = String(fileName || "").toLowerCase();
-  let page = raw.includes("purchase") ? "Purchase Matrix" : raw.includes("traffic") ? "Traffic Engagement" : "Traffic Engagement";
-  let filterType = defaultFilterType;
-  if (raw.includes("zone")) filterType = "Zone";
-  if (raw.includes("nccs")) filterType = "NCCS";
-  if (raw.includes("tier")) filterType = "Tier";
-  if (raw.includes("gender")) filterType = "Gender";
-  if (raw.includes("age")) filterType = "Age Band";
-
-  const options = FILTER_VALUE_OPTIONS[filterType] || [];
-  const matched = options.find((option) => raw.includes(option.toLowerCase().replace(/\s+/g, " ").replace(" & ", " ")) || raw.includes(option.toLowerCase().replace(/\s+/g, "_")) || raw.includes(option.toLowerCase().replace(/\s+/g, "-")));
-  return { page, filterType, filterValue: matched || firstFilterValue(filterType) };
-}
-
-function firstFilterValue(filterType) {
-  return (FILTER_VALUE_OPTIONS[filterType] || [""])[0] || "";
-}
-
 function formatDateTime(value) {
   if (!value) return "—";
   const date = new Date(value);
@@ -942,13 +809,52 @@ function formatDateTime(value) {
   return date.toLocaleString();
 }
 
+function formatRunLabel(run) {
+  const dt = formatDateTime(run.finishedAt || run.createdAt);
+  const suffix = run.status === "completed"
+    ? (run.hasUsableData ? "Ready" : "Needs review")
+    : capitalize(run.status || "In progress");
+  return `${dt} · ${suffix}`;
+}
+
+function formatEta(seconds) {
+  if (seconds === null || seconds === undefined || Number.isNaN(Number(seconds))) return "Calculating...";
+  const value = Math.max(0, Number(seconds));
+  if (value === 0) return "0 sec";
+  if (value < 60) return `${Math.round(value)} sec`;
+  const minutes = Math.floor(value / 60);
+  const remainder = Math.round(value % 60);
+  return remainder ? `${minutes} min ${remainder} sec` : `${minutes} min`;
+}
+
+function formatRatio(current, total) {
+  if (!total) return "—";
+  return `${Number(current || 0)} of ${Number(total || 0)}`;
+}
+
+function renderToastFallback(message) {
+  console.log(message);
+}
+
+function toast(message) {
+  renderToastFallback(message);
+}
+
+function renderPillToneForRun(run) {
+  if (!run) return { label: "No run", tone: "muted" };
+  if (run.status === "completed") return { label: run.hasUsableData ? "Ready" : "Needs review", tone: run.hasUsableData ? "success" : "danger" };
+  if (run.status === "failed") return { label: "Failed", tone: "danger" };
+  return { label: capitalize(run.status || "In progress"), tone: "warning" };
+}
+
 function setPill(element, label, tone) {
   element.textContent = label;
   element.className = `pill pill-${tone}`;
 }
 
-function toast(message) {
-  console.log(message);
+function capitalize(value) {
+  const text = String(value || "");
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : "";
 }
 
 function clamp(value, min, max) {
