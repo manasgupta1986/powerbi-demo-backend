@@ -1,4 +1,4 @@
-const STORAGE_KEY = "dm_analyst_console_v4";
+const STORAGE_KEY = "dm_analyst_console_v5";
 const POLL_INTERVAL_MS = 3000;
 
 const FILTER_VALUE_OPTIONS = {
@@ -101,7 +101,7 @@ function bindEvents() {
 
   els.saveSettingsBtn.addEventListener("click", saveSettingsFromControls);
   els.checkBackendBtn.addEventListener("click", checkBackend);
-  els.refreshRunsBtn.addEventListener("click", refreshRunHistory);
+  els.refreshRunsBtn.addEventListener("click", () => refreshRunHistory(true));
   els.runSelector.addEventListener("change", async () => {
     state.selectedRunId = els.runSelector.value || null;
     await persistState();
@@ -170,7 +170,7 @@ async function saveSettingsFromControls() {
   await persistState();
   updateWorkspaceBadge();
   toast("Settings saved");
-  await refreshRunHistory();
+  await refreshRunHistory(false);
 }
 
 function setActiveTab(tabId, persist = true) {
@@ -181,14 +181,11 @@ function setActiveTab(tabId, persist = true) {
 }
 
 function workspaceName() {
-  const raw = state.settings.clientName || "default-workspace";
-  return raw.trim() || "default-workspace";
+  return (state.settings.clientName || "default-workspace").trim() || "default-workspace";
 }
 
 function updateWorkspaceBadge() {
-  els.workspaceBadge.textContent = state.settings.clientName
-    ? `Client: ${state.settings.clientName}`
-    : "No client selected";
+  els.workspaceBadge.textContent = state.settings.clientName ? `Client: ${state.settings.clientName}` : "No client selected";
 }
 
 function selectedRun() {
@@ -313,8 +310,7 @@ function inferTagsFromFilename(fileName) {
   else if (/\bgender\b/.test(normalized)) filterType = "Gender";
   else if (/\bage\s*band\b/.test(normalized) || /\bage\b/.test(normalized)) filterType = "Age Band";
 
-  const filterValue = inferFilterValue(normalized, filterType);
-  return { page, filterType, filterValue };
+  return { page, filterType, filterValue: inferFilterValue(normalized, filterType) };
 }
 
 function normalizeFileName(fileName) {
@@ -333,23 +329,19 @@ function inferFilterValue(normalized, filterType) {
     if (/\bsouth\b/.test(normalized)) return "South";
     if (/\bwest\b/.test(normalized)) return "West";
   }
-
   if (filterType === "NCCS") {
-    if (/\bnccs\s*a\b|\ba\b/.test(normalized)) return "A";
-    if (/\bnccs\s*b\b|\bb\b/.test(normalized)) return "B";
+    if (/\bnccs\s*a\b/.test(normalized)) return "A";
+    if (/\bnccs\s*b\b/.test(normalized)) return "B";
   }
-
   if (filterType === "Tier") {
     if (/\btier\s*1\b/.test(normalized)) return "Tier 1";
     if (/\btier\s*2\b/.test(normalized)) return "Tier 2";
     if (/\btier\s*3\b|\blower\b/.test(normalized)) return "Tier 3 & lower";
   }
-
   if (filterType === "Gender") {
     if (/\bmale\b/.test(normalized)) return "Male";
     if (/\bfemale\b/.test(normalized)) return "Female";
   }
-
   if (filterType === "Age Band") {
     if (/\bbelow\s*18\b|\bunder\s*18\b/.test(normalized)) return "Below 18";
     if (/\b18\s*24\b|\b18\s*to\s*24\b|\b18-24\b/.test(normalized)) return "18-24";
@@ -358,7 +350,6 @@ function inferFilterValue(normalized, filterType) {
     if (/\b45\s*54\b|\b45\s*to\s*54\b|\b45-54\b/.test(normalized)) return "45-54";
     if (/\b55\+\b|\b55\s*plus\b/.test(normalized)) return "55+";
   }
-
   return FILTER_VALUE_OPTIONS[filterType]?.[0] || "";
 }
 
@@ -477,9 +468,12 @@ async function analyzeScreenshots() {
       const item = state.queue[i];
       setPill(els.analysisStatus, "Uploading", "warning");
       els.analysisProgress.innerHTML = `
-        <div><strong>Status:</strong> Uploading screenshots</div>
-        <div><strong>Current file:</strong> ${escapeHtml(item.fileName)}</div>
-        <div><strong>Progress:</strong> ${i + 1} of ${state.queue.length}</div>
+        <div><strong>Actual status:</strong> uploading</div>
+        <div><strong>What is happening:</strong> uploading screenshot ${i + 1} of ${state.queue.length}</div>
+        <div class="progress-grid">
+          <div class="progress-item"><div class="progress-label">Current file</div><div class="progress-value">${escapeHtml(item.fileName)}</div></div>
+          <div class="progress-item"><div class="progress-label">Estimated time remaining</div><div class="progress-value">Calculating...</div></div>
+        </div>
       `;
       await apiPost("/analyst/upload/file", {
         workspaceName: workspaceName(),
@@ -493,22 +487,14 @@ async function analyzeScreenshots() {
       });
     }
 
-    await apiPost("/analyst/upload/finish", {
-      workspaceName: workspaceName(),
-      runId
-    });
-
+    await apiPost("/analyst/upload/finish", { workspaceName: workspaceName(), runId });
     state.queue = [];
     state.carouselIndex = 0;
     await persistState();
     renderQueue();
 
-    await apiPost("/analyst/analyze/start", {
-      workspaceName: workspaceName(),
-      runId
-    });
-
-    await refreshRunHistory();
+    await apiPost("/analyst/analyze/start", { workspaceName: workspaceName(), runId });
+    await refreshRunHistory(false);
     beginPolling();
     await refreshStatusForSelectedRun(false);
     toast("Analysis started");
@@ -522,10 +508,7 @@ async function retryAnalysis() {
     syncSettingsFromDom();
     await ensureBackendReady();
     if (!state.selectedRunId) throw new Error("Select a run first");
-    await apiPost("/analyst/analyze/start", {
-      workspaceName: workspaceName(),
-      runId: state.selectedRunId
-    });
+    await apiPost("/analyst/analyze/start", { workspaceName: workspaceName(), runId: state.selectedRunId });
     beginPolling();
     await refreshStatusForSelectedRun(false);
     toast("Analysis retried");
@@ -562,7 +545,7 @@ async function refreshStatusForSelectedRun(showToast) {
     if (state.analysisInProgress) beginPolling();
     else stopPolling();
 
-    await refreshRunHistory();
+    await refreshRunHistory(false);
     if (data.status === "completed") await refreshReportForSelectedRun(false);
     renderAll();
     if (showToast) toast(`Status updated: ${data.status}`);
@@ -574,9 +557,7 @@ async function refreshStatusForSelectedRun(showToast) {
 function renderAnalysisStatus() {
   const status = state.latestStatus?.status || "idle";
   const progress = state.latestStatus?.progress || null;
-  const label = status === "completed"
-    ? (state.latestStatus?.hasUsableData ? "Ready" : "Needs review")
-    : capitalize(status);
+  const label = status === "completed" ? (state.latestStatus?.hasUsableData ? "Ready" : "Needs review") : capitalize(status);
   const tone = status === "completed"
     ? (state.latestStatus?.hasUsableData ? "success" : "danger")
     : status === "failed"
@@ -590,7 +571,6 @@ function renderAnalysisStatus() {
     els.analysisProgress.textContent = "No run selected yet.";
     return;
   }
-
   if (!state.latestStatus) {
     els.analysisProgress.textContent = "No analysis started yet.";
     return;
@@ -707,17 +687,20 @@ function renderChatArea() {
   `;
 
   if (!usable) {
-    els.chatMessages.innerHTML = `<div class="chat-message assistant">This run is blocked for chat because the usable-data check failed. Select another run or retry analysis.</div>`;
+    els.chatMessages.innerHTML = `<div class="chat-message assistant"><div class="chat-meta">${escapeHtml(formatDateTime(new Date().toISOString()))}</div><div class="chat-content">This run is blocked for chat because the usable-data check failed. Select another run or retry analysis.</div></div>`;
     return;
   }
 
   if (!messages.length) {
-    els.chatMessages.innerHTML = `<div class="chat-message assistant">I’m ready to answer questions about this selected run and continue from the latest saved context.</div>`;
+    els.chatMessages.innerHTML = `<div class="chat-message assistant"><div class="chat-meta">${escapeHtml(formatDateTime(new Date().toISOString()))}</div><div class="chat-content">I’m ready to answer questions about this selected run and continue from the latest saved context.</div></div>`;
     return;
   }
 
   els.chatMessages.innerHTML = messages.map((message) => `
-    <div class="chat-message ${message.role === "user" ? "user" : "assistant"}">${escapeHtml(message.content)}</div>
+    <div class="chat-message ${message.role === "user" ? "user" : "assistant"}">
+      <div class="chat-meta">${escapeHtml(formatDateTime(message.createdAt))}</div>
+      <div class="chat-content">${escapeHtml(message.content)}</div>
+    </div>
   `).join("");
   els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
 }
@@ -811,9 +794,7 @@ function formatDateTime(value) {
 
 function formatRunLabel(run) {
   const dt = formatDateTime(run.finishedAt || run.createdAt);
-  const suffix = run.status === "completed"
-    ? (run.hasUsableData ? "Ready" : "Needs review")
-    : capitalize(run.status || "In progress");
+  const suffix = run.status === "completed" ? (run.hasUsableData ? "Ready" : "Needs review") : capitalize(run.status || "In progress");
   return `${dt} · ${suffix}`;
 }
 
@@ -832,19 +813,8 @@ function formatRatio(current, total) {
   return `${Number(current || 0)} of ${Number(total || 0)}`;
 }
 
-function renderToastFallback(message) {
-  console.log(message);
-}
-
 function toast(message) {
-  renderToastFallback(message);
-}
-
-function renderPillToneForRun(run) {
-  if (!run) return { label: "No run", tone: "muted" };
-  if (run.status === "completed") return { label: run.hasUsableData ? "Ready" : "Needs review", tone: run.hasUsableData ? "success" : "danger" };
-  if (run.status === "failed") return { label: "Failed", tone: "danger" };
-  return { label: capitalize(run.status || "In progress"), tone: "warning" };
+  console.log(message);
 }
 
 function setPill(element, label, tone) {
