@@ -17,47 +17,6 @@
       <span id="backendStatus" class="pill pill-muted">Backend unknown</span>
     </header>
 
-    <section class="card">
-      <div class="section-heading">
-        <h2>Client Setup</h2>
-        <button id="checkBackendBtn" class="btn btn-secondary">Check backend</button>
-      </div>
-      <label>
-        <span>Client / Platform name</span>
-        <input id="clientName" type="text" placeholder="Flipkart, Amazon, Zepto..." />
-      </label>
-      <div class="helper-text">This name is used by the AI to tailor insights for CMI and category leads.</div>
-      <details class="advanced-panel">
-        <summary>Advanced settings</summary>
-        <div class="advanced-body">
-          <label>
-            <span>Backend URL</span>
-            <input id="backendUrl" type="url" placeholder="https://powerbi-demo-backend.onrender.com" />
-          </label>
-          <div class="button-row action-row">
-            <button id="saveSettingsBtn" class="btn btn-primary">Save settings</button>
-          </div>
-        </div>
-      </details>
-    </section>
-
-    <section class="card compact-card">
-      <div class="section-heading">
-        <h2>Selected Run</h2>
-        <span id="selectedRunStatus" class="pill pill-muted">No run</span>
-      </div>
-      <label>
-        <span>Run date and time</span>
-        <select id="runSelector">
-          <option value="">No saved runs</option>
-        </select>
-      </label>
-      <div id="selectedRunMeta" class="status-box empty-state">The selected run will be used by Current, Report, and Ask.</div>
-      <div class="button-row action-row">
-        <button id="refreshRunsBtn" class="btn btn-secondary">Refresh runs</button>
-      </div>
-    </section>
-
     <nav class="tab-nav">
       <button class="tab-btn active" data-tab="tab-collect">Collect</button>
       <button class="tab-btn" data-tab="tab-report">Report</button>
@@ -66,6 +25,47 @@
 
     <main class="tab-content">
       <section id="tab-collect" class="tab-panel active">
+        <section class="card">
+          <div class="section-heading">
+            <h2>Client Setup</h2>
+            <button id="checkBackendBtn" class="btn btn-secondary">Check backend</button>
+          </div>
+          <label>
+            <span>Client / Platform name</span>
+            <input id="clientName" type="text" placeholder="Flipkart, Amazon, Zepto..." />
+          </label>
+          <div class="helper-text">This name is used by the AI to tailor insights for CMI and category leads.</div>
+          <details class="advanced-panel">
+            <summary>Advanced settings</summary>
+            <div class="advanced-body">
+              <label>
+                <span>Backend URL</span>
+                <input id="backendUrl" type="url" placeholder="https://powerbi-demo-backend.onrender.com" />
+              </label>
+              <div class="button-row action-row">
+                <button id="saveSettingsBtn" class="btn btn-primary">Save settings</button>
+              </div>
+            </div>
+          </details>
+        </section>
+
+        <section class="card compact-card">
+          <div class="section-heading">
+            <h2>Selected Run</h2>
+            <span id="selectedRunStatus" class="pill pill-muted">No run</span>
+          </div>
+          <label>
+            <span>Run date and time</span>
+            <select id="runSelector">
+              <option value="">No saved runs</option>
+            </select>
+          </label>
+          <div id="selectedRunMeta" class="status-box empty-state">The selected run will be used by Current, Report, and Ask.</div>
+          <div class="button-row action-row">
+            <button id="refreshRunsBtn" class="btn btn-secondary">Refresh runs</button>
+          </div>
+        </section>
+
         <section class="card">
           <div class="section-heading">
             <h2>Step 1 — Add Screenshots</h2>
