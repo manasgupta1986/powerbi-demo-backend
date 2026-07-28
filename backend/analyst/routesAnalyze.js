@@ -72,7 +72,8 @@ router.get("/analyze/status", async (req, res) => {
       hasSummary: Boolean(analysis?.summary),
       hasReport: Boolean(analysis?.report),
       hasUsableData: usable,
-      usableStatus: analysis ? (usable ? "usable" : "needs_review") : "unknown"
+      usableStatus: analysis ? (usable ? "usable" : "needs_review") : "unknown",
+      progress: run.progress || null
     });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message || "Failed to fetch analysis status" });
@@ -89,7 +90,8 @@ router.get("/analyze/latest", async (req, res) => {
       workspaceName,
       latest: latest || null,
       hasUsableData: usable,
-      usableStatus: latest?.analysis ? (usable ? "usable" : "needs_review") : "unknown"
+      usableStatus: latest?.analysis ? (usable ? "usable" : "needs_review") : "unknown",
+      progress: latest?.run?.progress || null
     });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message || "Failed to fetch latest analysis" });
