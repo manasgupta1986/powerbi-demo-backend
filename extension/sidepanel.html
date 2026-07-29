@@ -32,9 +32,9 @@
           </div>
           <label>
             <span>Client / Platform name</span>
-            <input id="clientName" type="text" placeholder="Flipkart, Amazon, Zepto..." />
+            <input id="clientName" type="text" placeholder="Amazon, Flipkart, Zepto..." />
           </label>
-          <div class="helper-text">This name is used by the AI to tailor insights for CMI and category leads.</div>
+          <div class="helper-text">This is used by AI when tailoring business insights for CMI and category leads.</div>
           <details class="advanced-panel">
             <summary>Advanced settings</summary>
             <div class="advanced-body">
@@ -60,7 +60,7 @@
               <option value="">No saved runs</option>
             </select>
           </label>
-          <div id="selectedRunMeta" class="status-box empty-state">The selected run will be used by Current, Report, and Ask.</div>
+          <div id="selectedRunMeta" class="status-box empty-state">The selected run is used by Status, Report, and Ask.</div>
           <div class="button-row action-row">
             <button id="refreshRunsBtn" class="btn btn-secondary">Refresh runs</button>
           </div>
@@ -71,7 +71,8 @@
             <h2>Step 1 — Add Screenshots</h2>
             <span id="queueCount" class="muted">0 files</span>
           </div>
-          <div class="helper-text">Tags are auto-read from the file name. You can still adjust them if needed.</div>
+          <div class="helper-text">Each screenshot should belong to a page family and be marked as either baseline or filtered cut.</div>
+          <div class="helper-text">File names can still auto-populate tags, but baseline should be confirmed manually.</div>
           <input id="fileInput" class="hidden" type="file" accept="image/*" multiple />
           <div class="button-row action-row">
             <button id="addScreenshotsBtn" class="btn btn-primary">Add Screenshots</button>
@@ -92,9 +93,9 @@
         <section class="card">
           <div class="section-heading">
             <h2>Step 2 — Analyze</h2>
-            <span class="pill pill-muted">One click</span>
+            <span class="pill pill-muted">Baseline-aware</span>
           </div>
-          <div class="helper-text">Analyze will upload everything currently in the queue, start backend slicing, then run extraction.</div>
+          <div class="helper-text">The backend studies baseline first, compares cuts against it, then ranks the top 4 business priorities.</div>
           <div class="button-row action-row sticky-cta">
             <button id="analyzeNowBtn" class="btn btn-primary">Analyze Screenshots</button>
           </div>
@@ -116,7 +117,7 @@
       <section id="tab-report" class="tab-panel">
         <section class="card">
           <div class="section-heading">
-            <h2>Summary Report</h2>
+            <h2>Executive Summary</h2>
             <span id="reportStatus" class="pill pill-muted">No report</span>
           </div>
           <div id="reportReference" class="status-box empty-state">Select a run to view its report.</div>
@@ -125,9 +126,7 @@
             <a id="openReportLink" class="btn btn-ghost" href="#" target="_blank" rel="noreferrer">Open full report</a>
           </div>
         </section>
-        <section class="card">
-          <div id="reportContainer" class="report-box empty-state">No report available yet.</div>
-        </section>
+        <section class="card"><div id="reportContainer" class="report-box empty-state">No report available yet.</div></section>
       </section>
 
       <section id="tab-ask" class="tab-panel">
@@ -143,7 +142,7 @@
           <div class="chat-compose">
             <label>
               <span>Ask a question</span>
-              <textarea id="chatInput" rows="3" placeholder="Ask about trends, top apps, confidence levels, or what the client should action next..."></textarea>
+              <textarea id="chatInput" rows="3" placeholder="Ask about top priorities, baseline vs cut gaps, recent weeks, or what to fix first..."></textarea>
             </label>
             <div class="button-row action-row">
               <button id="clearChatBtn" class="btn btn-secondary">Clear Chat</button>
