@@ -63,6 +63,43 @@ router.get("/analyze/status", async (req, res) => {
     const analysis = getAnalysis(workspaceName, runId);
     const usable = hasUsableData(analysis);
 
+    const activeStatuses = new Set(["queued", "extracting", "collecting", "upload_complete", "started"]);
+    const staleAfterMs = Math.max(60000, Number(process.env.ANALYST_PROGRESS_STALE_AFTER_MS || 180000));
+    const now = Date.now();
+    const progressUpdatedAtMs = run.progress?.updatedAt ? Date.parse(run.progress.updatedAt) : NaN;
+    const staleMs = Number.isFinite(progressUpdatedAtMs) ? Math.max(0, now - progressUpdatedAtMs) : null;
+    const isActive = activeStatuses.has(run.status);
+    const isStalled = isActive && (!run.progress || !Number.isFinite(progressUpdatedAtMs) || staleMs >= staleAfterMs);
+
+    let progress = run.progress || null;
+    if (!progress && isActive) {
+      progress = {
+        phase: run.status,
+        message: "No backend heartbeat has been written yet. This usually means old backend code is deployed or the worker is stuck before progress initialization.",
+        estimatedSecondsRemaining: null,
+        currentFileName: null,
+        currentFileIndex: 0,
+        totalFiles: run.fileCount || 0,
+        currentSliceIndex: 0,
+        totalSlicesForFile: 0,
+        processedSlices: 0,
+        totalSlices: 0,
+        currentBatchIndex: 0,
+        totalBatches: 0,
+        updatedAt: null,
+        isStalled: true,
+        staleSeconds: null
+      };
+    } else if (progress && isStalled) {
+      progress = {
+        ...progress,
+        message: `No backend heartbeat for ${Math.floor((staleMs || 0) / 1000)}s during ${progress.phase || run.status}. Check Render logs or retry this run.`,
+        estimatedSecondsRemaining: null,
+        isStalled: true,
+        staleSeconds: Math.floor((staleMs || 0) / 1000)
+      };
+    }
+
     return res.json({
       ok: true,
       workspaceName,
@@ -75,7 +112,8 @@ router.get("/analyze/status", async (req, res) => {
       topInsightCount: analysis?.report?.top_insights?.length || 0,
       hasUsableData: usable,
       usableStatus: analysis ? (usable ? "usable" : "needs_review") : "unknown",
-      progress: run.progress || null
+      stalled: Boolean(progress?.isStalled),
+      progress: progress
     });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message || "Failed to fetch analysis status" });
