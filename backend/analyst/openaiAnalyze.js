@@ -12,6 +12,7 @@ const DEFAULT_VISION_MAX_WIDTH = Math.max(700, Number(process.env.ANALYST_VISION
 const DEFAULT_VISION_DETAIL = process.env.ANALYST_VISION_DETAIL || "low";
 const EST_SECONDS_PER_SLICE = Math.max(3, Number(process.env.ANALYST_EST_SECONDS_PER_SLICE || 8));
 const EST_SECONDS_FOR_SUMMARY = Math.max(4, Number(process.env.ANALYST_EST_SECONDS_FOR_SUMMARY || 10));
+const OPENAI_TIMEOUT_MS = Math.max(30000, Number(process.env.ANALYST_OPENAI_TIMEOUT_MS || 180000));
 
 const DEFAULT_ANALYSIS_PROMPT = `
 You are analyzing tagged dashboard screenshots from a business intelligence workflow.
@@ -351,17 +352,29 @@ async function buildSliceInputs(run, workspaceName) {
   return limitSlicesPerFile(slices);
 }
 
-async function callOpenAIJson({ apiKey, messages }) {
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({ model: OPENAI_MODEL, temperature: 0.1, response_format: { type: "json_object" }, messages })
-  });
-  const raw = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(raw?.error?.message || "OpenAI request failed");
-  const content = raw?.choices?.[0]?.message?.content;
-  if (!content) throw new Error("OpenAI returned an empty response");
-  return parseJsonSafe(content);
+async function callOpenAIJson({ apiKey, messages, timeoutMs = OPENAI_TIMEOUT_MS }) {
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ model: OPENAI_MODEL, temperature: 0.1, response_format: { type: "json_object" }, messages }),
+      signal: controller.signal
+    });
+    const raw = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(raw?.error?.message || "OpenAI request failed");
+    const content = raw?.choices?.[0]?.message?.content;
+    if (!content) throw new Error("OpenAI returned an empty response");
+    return parseJsonSafe(content);
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`OpenAI request timed out after ${Math.round(timeoutMs / 1000)}s`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
 }
 
 function isTooLargeError(error) {
@@ -399,6 +412,21 @@ async function extractAxisHints({ apiKey, run, slices, workspaceName }) {
     content.push({ type: "text", text: `source_file=${slice.sourceFile} page=${slice.page} comparison_mode=${slice.comparisonMode} filter_type=${slice.filterType} filter_value=${slice.filterValue} slice_label=${slice.sliceLabel}` });
     content.push({ type: "image_url", image_url: { url: await imagePathToDataUrl(slice.slicePath, 1200, "low"), detail: "low" } });
   }
+
+  updateRunProgress({ workspaceName, runId: run.runId, progress: {
+    phase: "axis_read",
+    message: `Sending axis-read request to AI for ${axisSlices.length} slice(s)`,
+    currentFileName: axisSlices[0]?.sourceFile || null,
+    currentFileIndex: axisSlices[0]?.fileIndex || 0,
+    totalFiles: run.files.length,
+    currentSliceIndex: axisSlices[0]?.sliceIndex || 0,
+    totalSlicesForFile: axisSlices[0]?.totalSlicesForFile || 0,
+    processedSlices: 0,
+    totalSlices: axisSlices.length,
+    currentBatchIndex: 1,
+    totalBatches: 1,
+    estimatedSecondsRemaining: Math.max(6, axisSlices.length * 4)
+  }});
 
   const parsed = await callOpenAIJson({ apiKey, messages: [
     { role: "system", content: "You read time-axis labels from dashboard chart screenshots. Extract only visible weekly labels and week start dates. Return JSON only." },
@@ -455,9 +483,39 @@ async function extractBatchOnce({ apiKey, batch, promptText, detailMode, maxWidt
     metadataLines
   ].join("\n") }];
 
-  for (const slice of batch) {
+  for (let index = 0; index < batch.length; index += 1) {
+    const slice = batch[index];
+    updateRunProgress({ workspaceName, runId: run.runId, progress: {
+      phase: "extracting",
+      message: `Preparing slice ${index + 1} of ${batch.length} for batch ${batchIndex} of ${batchCount}`,
+      currentFileName: slice.sourceFile,
+      currentFileIndex: slice.fileIndex,
+      totalFiles: slice.totalFiles,
+      currentSliceIndex: slice.sliceIndex,
+      totalSlicesForFile: slice.totalSlicesForFile,
+      processedSlices: processedSlicesBeforeBatch + index,
+      totalSlices,
+      currentBatchIndex: batchIndex,
+      totalBatches: batchCount,
+      estimatedSecondsRemaining: buildEstimatedSeconds(totalSlices, processedSlicesBeforeBatch, batchCount, "extracting")
+    }});
     userContent.push({ type: "image_url", image_url: { url: await imagePathToDataUrl(slice.slicePath, maxWidth, detailMode), detail: detailMode } });
   }
+
+  updateRunProgress({ workspaceName, runId: run.runId, progress: {
+    phase: "extracting",
+    message: `Waiting for AI response on batch ${batchIndex} of ${batchCount}`,
+    currentFileName: first.sourceFile,
+    currentFileIndex: first.fileIndex,
+    totalFiles: first.totalFiles,
+    currentSliceIndex: first.sliceIndex,
+    totalSlicesForFile: first.totalSlicesForFile,
+    processedSlices: processedSlicesBeforeBatch,
+    totalSlices,
+    currentBatchIndex: batchIndex,
+    totalBatches: batchCount,
+    estimatedSecondsRemaining: buildEstimatedSeconds(totalSlices, processedSlicesBeforeBatch, batchCount, "extracting")
+  }});
 
   return callOpenAIJson({ apiKey, messages: [
     { role: "system", content: "You are a meticulous BI analyst. Extract only visually supported values from the provided chart slices. Preserve baseline-vs-cut context, week labels, and visible dimensions only. Return JSON only." },
