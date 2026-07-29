@@ -8,8 +8,10 @@ function hasUsableData(analysis) {
   if (!analysis) return false;
   const numericRows = Array.isArray(analysis.numeric_rows) ? analysis.numeric_rows.length : 0;
   const textRows = Array.isArray(analysis.text_rows) ? analysis.text_rows.length : 0;
+  const timeHints = Array.isArray(analysis.time_hints) ? analysis.time_hints.length : 0;
+  const topInsights = Array.isArray(analysis.report?.top_insights) ? analysis.report.top_insights.length : 0;
   const summary = typeof analysis.summary === "string" ? analysis.summary.trim() : "";
-  return numericRows > 0 || textRows > 0 || summary.length > 0;
+  return numericRows > 0 || textRows > 0 || timeHints > 0 || topInsights > 0 || summary.length > 0;
 }
 
 router.post("/analyze/start", async (req, res) => {
@@ -69,8 +71,8 @@ router.get("/analyze/status", async (req, res) => {
       error: run.error || null,
       numericRowCount: analysis?.numeric_rows?.length || 0,
       textRowCount: analysis?.text_rows?.length || 0,
-      hasSummary: Boolean(analysis?.summary),
-      hasReport: Boolean(analysis?.report),
+      timeHintCount: analysis?.time_hints?.length || 0,
+      topInsightCount: analysis?.report?.top_insights?.length || 0,
       hasUsableData: usable,
       usableStatus: analysis ? (usable ? "usable" : "needs_review") : "unknown",
       progress: run.progress || null
