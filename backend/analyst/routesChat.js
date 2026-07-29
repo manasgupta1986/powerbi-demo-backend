@@ -17,6 +17,99 @@ function hasUsableData(analysis) {
   return numeric > 0 || text > 0 || hints > 0 || topInsights > 0 || Boolean((analysis?.summary || "").trim());
 }
 
+
+const WEEK_LABEL_RE = /\b(20\d{2})-W(\d{1,2})\b/g;
+
+function parseWeekLabel(label) {
+  const match = String(label || "").match(/\b(20\d{2})-W(\d{1,2})\b/);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const week = Number(match[2]);
+  if (!Number.isFinite(year) || !Number.isFinite(week)) return null;
+  return { label: `${year}-W${String(week).padStart(2, "0")}`, year, week, index: year * 53 + week };
+}
+
+function collectParsedWeeks(analysis) {
+  const parsed = [];
+  const pushParsed = (value) => {
+    const item = parseWeekLabel(value);
+    if (item) parsed.push(item);
+  };
+
+  for (const hint of Array.isArray(analysis?.time_hints) ? analysis.time_hints : []) {
+    for (const visible of Array.isArray(hint?.visible_weeks) ? hint.visible_weeks : []) pushParsed(visible?.week_label);
+  }
+  for (const row of Array.isArray(analysis?.numeric_rows) ? analysis.numeric_rows : []) pushParsed(row?.time_period);
+  for (const row of Array.isArray(analysis?.text_rows) ? analysis.text_rows : []) pushParsed(row?.time_period);
+
+  const unique = new Map();
+  for (const item of parsed) unique.set(item.label, item);
+  return Array.from(unique.values()).sort((a, b) => a.index - b.index);
+}
+
+function pickAuthoritativeWeekCluster(parsedWeeks) {
+  if (!parsedWeeks.length) return null;
+  const clusters = [];
+  let current = [parsedWeeks[0]];
+  for (let i = 1; i < parsedWeeks.length; i += 1) {
+    if ((parsedWeeks[i].index - current[current.length - 1].index) > 4) {
+      clusters.push(current);
+      current = [parsedWeeks[i]];
+    } else {
+      current.push(parsedWeeks[i]);
+    }
+  }
+  clusters.push(current);
+  clusters.sort((a, b) => {
+    if (b.length !== a.length) return b.length - a.length;
+    return b[b.length - 1].index - a[a.length - 1].index;
+  });
+  return clusters[0];
+}
+
+function deriveAuthoritativeWeekSupport(analysis) {
+  const parsedWeeks = collectParsedWeeks(analysis);
+  if (!parsedWeeks.length) return null;
+  const cluster = pickAuthoritativeWeekCluster(parsedWeeks) || parsedWeeks;
+  const labels = cluster.map((item) => item.label);
+  return {
+    earliest: labels[0],
+    latest: labels[labels.length - 1],
+    labels,
+    label_set: labels,
+    range_label: `${labels[0]} to ${labels[labels.length - 1]}`,
+    all_detected_labels: parsedWeeks.map((item) => item.label)
+  };
+}
+
+function weekLabelInSupport(value, support) {
+  if (!support || !Array.isArray(support.labels) || !support.labels.length) return true;
+  const parsed = parseWeekLabel(value);
+  if (!parsed) return true;
+  return support.labels.includes(parsed.label);
+}
+
+function filterRowsToSupport(rows, support, fieldName) {
+  return (Array.isArray(rows) ? rows : []).filter((row) => weekLabelInSupport(row?.[fieldName], support));
+}
+
+function filterTimeHintsToSupport(timeHints, support) {
+  if (!support) return Array.isArray(timeHints) ? timeHints : [];
+  return (Array.isArray(timeHints) ? timeHints : []).map((hint) => ({
+    ...hint,
+    visible_weeks: (Array.isArray(hint?.visible_weeks) ? hint.visible_weeks : []).filter((item) => weekLabelInSupport(item?.week_label, support))
+  })).filter((hint) => Array.isArray(hint.visible_weeks) && hint.visible_weeks.length);
+}
+
+function buildSafeTitle(originalTitle, clientName, support) {
+  const fallback = `${clientName || "Client"} Executive BI Report`;
+  const base = String(originalTitle || fallback)
+    .replace(/\s*\((?:[^()]*\b20\d{2}-W\d{1,2}\b[^()]*)\)\s*$/i, "")
+    .trim() || fallback;
+  if (!support?.range_label) return base;
+  return `${base} (${support.range_label})`;
+}
+
 router.post("/chat", async (req, res) => {
   try {
     const apiKey = process.env.OPENAI_API_KEY;
@@ -45,16 +138,26 @@ router.post("/chat", async (req, res) => {
     if (!analysis) return res.status(409).json(buildError("extraction_pending", "No analysis is available yet for this run"));
     if (!hasUsableData(analysis)) return res.status(409).json(buildError("no_numeric_rows", "Analysis completed but no usable data was extracted."));
 
+    const authoritativeWeekSupport = deriveAuthoritativeWeekSupport(analysis);
+    const filteredTimeHints = filterTimeHintsToSupport(analysis.time_hints || [], authoritativeWeekSupport);
+    const filteredNumericRows = filterRowsToSupport(analysis.numeric_rows || [], authoritativeWeekSupport, "time_period");
+    const filteredTextRows = filterRowsToSupport(analysis.text_rows || [], authoritativeWeekSupport, "time_period");
+
     const grounding = {
       runId: resolvedRun.runId,
       clientName: resolvedRun.clientName || "",
       createdAt: resolvedRun.createdAt,
       finishedAt: resolvedRun.finishedAt,
-      time_hints: analysis.time_hints || [],
-      numeric_rows: analysis.numeric_rows || [],
-      text_rows: analysis.text_rows || [],
+      authoritative_visible_weeks: authoritativeWeekSupport,
+      authoritative_supported_week_labels: authoritativeWeekSupport?.labels || [],
+      time_hints: filteredTimeHints,
+      numeric_rows: filteredNumericRows,
+      text_rows: filteredTextRows,
       summary: analysis.summary || "",
-      report: analysis.report || {}
+      report: {
+        ...(analysis.report || {}),
+        title: buildSafeTitle(analysis.report?.title, resolvedRun.clientName || resolvedRun.workspaceName, authoritativeWeekSupport)
+      }
     };
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -66,7 +169,7 @@ router.post("/chat", async (req, res) => {
         messages: [
           {
             role: "system",
-            content: "You answer only from the supplied extracted dashboard data. Use top_insights as the primary grounding when relevant. Use baseline vs filtered-cut comparisons when discussing what is hurting the business. Use time_hints as authoritative evidence for visible week labels. Never hallucinate missing dimensions such as categories. If exact values are unavailable but the direction of risk is visible, say so clearly."
+            content: "You answer only from the supplied extracted dashboard data for the selected run. Treat authoritative_visible_weeks and authoritative_supported_week_labels as the highest-priority evidence for time windows. If older or conflicting year-week labels fall outside authoritative_visible_weeks, treat them as stale extraction noise and ignore them. Never say a week is unavailable if it appears in authoritative_supported_week_labels. Use top_insights as primary grounding when relevant. Use baseline vs filtered-cut comparisons when discussing what is hurting the business. Never hallucinate missing dimensions such as categories. If exact values are unavailable but the direction of risk is visible, say so clearly."
           },
           { role: "user", content: `Grounding JSON:\n${JSON.stringify(grounding, null, 2)}\n\nQuestion: ${String(question).trim()}` }
         ]
