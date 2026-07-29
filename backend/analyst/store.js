@@ -99,6 +99,8 @@ function createRun({ workspaceName, clientName = "", operatorName = "" }) {
     fileCount: 0,
     numericRowCount: 0,
     textRowCount: 0,
+    timeHintCount: 0,
+    topInsightCount: 0,
     hasUsableData: false,
     progress: defaultProgress(),
     files: []
@@ -124,6 +126,7 @@ function saveBase64Image({ workspaceName, runId, fileName, dataUrl }) {
   if (!dataUrl || typeof dataUrl !== "string" || !dataUrl.startsWith("data:image/")) {
     throw new Error("Invalid image dataUrl");
   }
+
   const { uploadsDir } = getWorkspaceParts(workspaceName);
   const runDir = path.join(uploadsDir, runId);
   ensureDir(runDir);
@@ -134,6 +137,7 @@ function saveBase64Image({ workspaceName, runId, fileName, dataUrl }) {
   const imagePath = path.join(runDir, storedFileName);
   const base64 = dataUrl.replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, "");
   fs.writeFileSync(imagePath, Buffer.from(base64, "base64"));
+
   return {
     storedFileName,
     imagePath,
@@ -141,13 +145,14 @@ function saveBase64Image({ workspaceName, runId, fileName, dataUrl }) {
   };
 }
 
-function addFileToRun({ workspaceName, runId, fileName, page, filterType, filterValue, note, dataUrl }) {
+function addFileToRun({ workspaceName, runId, fileName, page, comparisonMode, filterType, filterValue, note, dataUrl }) {
   const runsFile = getRunsFile(workspaceName);
   const runs = readJson(runsFile, []);
   const idx = runs.findIndex((run) => run.runId === runId);
   if (idx === -1) throw new Error("Run not found");
 
   const saved = saveBase64Image({ workspaceName, runId, fileName, dataUrl });
+  const normalizedComparisonMode = comparisonMode === "baseline" ? "baseline" : "cut";
   const fileRecord = {
     fileId: `file_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     fileName: fileName || saved.storedFileName,
@@ -155,8 +160,9 @@ function addFileToRun({ workspaceName, runId, fileName, page, filterType, filter
     imagePath: saved.imagePath,
     publicPath: saved.publicPath,
     page: page || "",
-    filterType: filterType || "",
-    filterValue: filterValue || "",
+    comparisonMode: normalizedComparisonMode,
+    filterType: filterType || (normalizedComparisonMode === "baseline" ? "Baseline" : ""),
+    filterValue: filterValue || (normalizedComparisonMode === "baseline" ? "Overall" : ""),
     note: note || "",
     uploadedAt: new Date().toISOString()
   };
@@ -180,6 +186,7 @@ function finishRun({ workspaceName, runId }) {
   const runs = readJson(runsFile, []);
   const idx = runs.findIndex((run) => run.runId === runId);
   if (idx === -1) throw new Error("Run not found");
+
   runs[idx].status = "upload_complete";
   runs[idx].progress = {
     ...(runs[idx].progress || defaultProgress()),
@@ -197,6 +204,7 @@ function updateRunStatus({ workspaceName, runId, status, error = null }) {
   const runs = readJson(runsFile, []);
   const idx = runs.findIndex((run) => run.runId === runId);
   if (idx === -1) throw new Error("Run not found");
+
   runs[idx].status = status;
   runs[idx].error = error;
   if (status === "failed") {
@@ -217,6 +225,7 @@ function updateRunProgress({ workspaceName, runId, progress }) {
   const runs = readJson(runsFile, []);
   const idx = runs.findIndex((run) => run.runId === runId);
   if (idx === -1) throw new Error("Run not found");
+
   runs[idx].progress = {
     ...(runs[idx].progress || defaultProgress()),
     ...(progress || {}),
@@ -230,8 +239,10 @@ function computeUsability(analysis) {
   if (!analysis) return false;
   const numericRows = Array.isArray(analysis.numeric_rows) ? analysis.numeric_rows.length : 0;
   const textRows = Array.isArray(analysis.text_rows) ? analysis.text_rows.length : 0;
+  const timeHints = Array.isArray(analysis.time_hints) ? analysis.time_hints.length : 0;
+  const topInsights = Array.isArray(analysis.report?.top_insights) ? analysis.report.top_insights.length : 0;
   const summary = typeof analysis.summary === "string" ? analysis.summary.trim() : "";
-  return numericRows > 0 || textRows > 0 || summary.length > 0;
+  return numericRows > 0 || textRows > 0 || timeHints > 0 || topInsights > 0 || summary.length > 0;
 }
 
 function saveAnalysis({ workspaceName, runId, analysis }) {
@@ -245,6 +256,8 @@ function saveAnalysis({ workspaceName, runId, analysis }) {
     runs[idx].finishedAt = new Date().toISOString();
     runs[idx].numericRowCount = Array.isArray(analysis.numeric_rows) ? analysis.numeric_rows.length : 0;
     runs[idx].textRowCount = Array.isArray(analysis.text_rows) ? analysis.text_rows.length : 0;
+    runs[idx].timeHintCount = Array.isArray(analysis.time_hints) ? analysis.time_hints.length : 0;
+    runs[idx].topInsightCount = Array.isArray(analysis.report?.top_insights) ? analysis.report.top_insights.length : 0;
     runs[idx].hasUsableData = computeUsability(analysis);
     runs[idx].progress = {
       ...(runs[idx].progress || defaultProgress()),
