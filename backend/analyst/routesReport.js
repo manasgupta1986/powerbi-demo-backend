@@ -13,27 +13,130 @@ function hasUsableData(analysis) {
   return numericRows > 0 || textRows > 0 || timeHints > 0 || topInsights > 0 || summary.length > 0;
 }
 
+
+const WEEK_LABEL_RE = /\b(20\d{2})-W(\d{1,2})\b/g;
+
+function parseWeekLabel(label) {
+  const match = String(label || "").match(/\b(20\d{2})-W(\d{1,2})\b/);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const week = Number(match[2]);
+  if (!Number.isFinite(year) || !Number.isFinite(week)) return null;
+  return { label: `${year}-W${String(week).padStart(2, "0")}`, year, week, index: year * 53 + week };
+}
+
+function collectParsedWeeks(analysis) {
+  const parsed = [];
+  const pushParsed = (value) => {
+    const item = parseWeekLabel(value);
+    if (item) parsed.push(item);
+  };
+
+  for (const hint of Array.isArray(analysis?.time_hints) ? analysis.time_hints : []) {
+    for (const visible of Array.isArray(hint?.visible_weeks) ? hint.visible_weeks : []) pushParsed(visible?.week_label);
+  }
+  for (const row of Array.isArray(analysis?.numeric_rows) ? analysis.numeric_rows : []) pushParsed(row?.time_period);
+  for (const row of Array.isArray(analysis?.text_rows) ? analysis.text_rows : []) pushParsed(row?.time_period);
+
+  const unique = new Map();
+  for (const item of parsed) unique.set(item.label, item);
+  return Array.from(unique.values()).sort((a, b) => a.index - b.index);
+}
+
+function pickAuthoritativeWeekCluster(parsedWeeks) {
+  if (!parsedWeeks.length) return null;
+  const clusters = [];
+  let current = [parsedWeeks[0]];
+  for (let i = 1; i < parsedWeeks.length; i += 1) {
+    if ((parsedWeeks[i].index - current[current.length - 1].index) > 4) {
+      clusters.push(current);
+      current = [parsedWeeks[i]];
+    } else {
+      current.push(parsedWeeks[i]);
+    }
+  }
+  clusters.push(current);
+  clusters.sort((a, b) => {
+    if (b.length !== a.length) return b.length - a.length;
+    return b[b.length - 1].index - a[a.length - 1].index;
+  });
+  return clusters[0];
+}
+
+function deriveAuthoritativeWeekSupport(analysis) {
+  const parsedWeeks = collectParsedWeeks(analysis);
+  if (!parsedWeeks.length) return null;
+  const cluster = pickAuthoritativeWeekCluster(parsedWeeks) || parsedWeeks;
+  const labels = cluster.map((item) => item.label);
+  return {
+    earliest: labels[0],
+    latest: labels[labels.length - 1],
+    labels,
+    label_set: labels,
+    range_label: `${labels[0]} to ${labels[labels.length - 1]}`,
+    all_detected_labels: parsedWeeks.map((item) => item.label)
+  };
+}
+
+function weekLabelInSupport(value, support) {
+  if (!support || !Array.isArray(support.labels) || !support.labels.length) return true;
+  const parsed = parseWeekLabel(value);
+  if (!parsed) return true;
+  return support.labels.includes(parsed.label);
+}
+
+function filterRowsToSupport(rows, support, fieldName) {
+  return (Array.isArray(rows) ? rows : []).filter((row) => weekLabelInSupport(row?.[fieldName], support));
+}
+
+function filterTimeHintsToSupport(timeHints, support) {
+  if (!support) return Array.isArray(timeHints) ? timeHints : [];
+  return (Array.isArray(timeHints) ? timeHints : []).map((hint) => ({
+    ...hint,
+    visible_weeks: (Array.isArray(hint?.visible_weeks) ? hint.visible_weeks : []).filter((item) => weekLabelInSupport(item?.week_label, support))
+  })).filter((hint) => Array.isArray(hint.visible_weeks) && hint.visible_weeks.length);
+}
+
+function buildSafeTitle(originalTitle, clientName, support) {
+  const fallback = `${clientName || "Client"} Executive BI Report`;
+  const base = String(originalTitle || fallback)
+    .replace(/\s*\((?:[^()]*\b20\d{2}-W\d{1,2}\b[^()]*)\)\s*$/i, "")
+    .trim() || fallback;
+  if (!support?.range_label) return base;
+  return `${base} (${support.range_label})`;
+}
+
 function buildReportPayload(run, analysis) {
+  const authoritativeWeekSupport = deriveAuthoritativeWeekSupport(analysis);
+  const filteredTimeHints = filterTimeHintsToSupport(analysis.time_hints || [], authoritativeWeekSupport);
+  const filteredNumericRows = filterRowsToSupport(analysis.numeric_rows || [], authoritativeWeekSupport, "time_period");
+  const filteredTextRows = filterRowsToSupport(analysis.text_rows || [], authoritativeWeekSupport, "time_period");
+  const safeReport = analysis.report || {
+    title: "",
+    executive_summary: [],
+    top_insights: [],
+    recommended_actions: [],
+    data_quality_notes: []
+  };
+
   return {
     runId: run.runId,
     workspaceName: run.workspaceName,
     clientName: run.clientName || "",
     createdAt: analysis.createdAt || run.createdAt,
-    numericRowCount: analysis.numeric_rows?.length || 0,
-    textRowCount: analysis.text_rows?.length || 0,
-    timeHintCount: analysis.time_hints?.length || 0,
+    numericRowCount: filteredNumericRows.length,
+    textRowCount: filteredTextRows.length,
+    timeHintCount: filteredTimeHints.length,
     hasUsableData: hasUsableData(analysis),
     summary: analysis.summary || "",
-    report: analysis.report || {
-      title: "",
-      executive_summary: [],
-      top_insights: [],
-      recommended_actions: [],
-      data_quality_notes: []
+    authoritative_visible_weeks: authoritativeWeekSupport,
+    report: {
+      ...safeReport,
+      title: buildSafeTitle(safeReport.title, run.clientName || run.workspaceName, authoritativeWeekSupport)
     },
-    time_hints: analysis.time_hints || [],
-    numeric_rows: analysis.numeric_rows || [],
-    text_rows: analysis.text_rows || []
+    time_hints: filteredTimeHints,
+    numeric_rows: filteredNumericRows,
+    text_rows: filteredTextRows
   };
 }
 
@@ -135,7 +238,7 @@ router.get("/report/html", (req, res) => {
 </head>
 <body>
   <h1>${payload.report.title || `${payload.clientName || "Client"} Executive Summary`}</h1>
-  <div class="meta">Run created ${payload.createdAt} · Numeric rows ${payload.numericRowCount} · Text rows ${payload.textRowCount} · Time hints ${payload.timeHintCount}</div>
+  <div class="meta">Run created ${payload.createdAt} · Numeric rows ${payload.numericRowCount} · Text rows ${payload.textRowCount} · Time hints ${payload.timeHintCount}${payload.authoritative_visible_weeks?.range_label ? ` · Visible weeks ${payload.authoritative_visible_weeks.range_label}` : ""}</div>
   ${listSection("Executive Summary", payload.report.executive_summary)}
   ${insightCards(payload.report.top_insights)}
   ${listSection("Recommended Actions", payload.report.recommended_actions)}
