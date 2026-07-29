@@ -135,23 +135,53 @@ async function loadState() {
   if (!data) return;
   state.settings = { ...state.settings, ...(data.settings || {}) };
   state.activeTab = data.activeTab || state.activeTab;
-  state.queue = Array.isArray(data.queue) ? data.queue : [];
-  state.carouselIndex = Number.isFinite(data.carouselIndex) ? data.carouselIndex : 0;
+  state.queue = [];
+  state.carouselIndex = 0;
   state.selectedRunId = data.selectedRunId || null;
   state.chatByRun = data.chatByRun || {};
 }
 
+function compactChatForStorage(chatByRun) {
+  const compact = {};
+  for (const [runId, messages] of Object.entries(chatByRun || {})) {
+    compact[runId] = (Array.isArray(messages) ? messages : []).slice(-20).map((message) => ({
+      role: message?.role === "user" ? "user" : "assistant",
+      content: String(message?.content || "").slice(0, 4000),
+      createdAt: message?.createdAt || new Date().toISOString()
+    }));
+  }
+  return compact;
+}
+
 async function persistState() {
-  await chrome.storage.local.set({
-    [STORAGE_KEY]: {
-      settings: state.settings,
-      activeTab: state.activeTab,
-      queue: state.queue,
-      carouselIndex: state.carouselIndex,
-      selectedRunId: state.selectedRunId,
-      chatByRun: state.chatByRun
+  try {
+    await chrome.storage.local.set({
+      [STORAGE_KEY]: {
+        settings: state.settings,
+        activeTab: state.activeTab,
+        queue: [],
+        carouselIndex: 0,
+        selectedRunId: state.selectedRunId,
+        chatByRun: compactChatForStorage(state.chatByRun)
+      }
+    });
+  } catch (error) {
+    if (String(error?.message || "").toLowerCase().includes("quotabytes")) {
+      await chrome.storage.local.set({
+        [STORAGE_KEY]: {
+          settings: state.settings,
+          activeTab: state.activeTab,
+          queue: [],
+          carouselIndex: 0,
+          selectedRunId: state.selectedRunId,
+          chatByRun: {}
+        }
+      });
+      console.warn("Storage quota hit. Screenshot queue is kept in memory only until upload.");
+      return;
     }
-  });
+    throw error;
+  }
 }
 
 function applyStateToDom() {
@@ -295,6 +325,7 @@ async function handleFilesSelected(event) {
   await persistState();
   renderQueue();
   toast(`${readFiles.length} screenshot(s) added`);
+  console.info("Screenshots are stored in memory for this session and will be cleared if the side panel reloads before upload.");
 }
 
 function inferTagsFromFilename(fileName) {
