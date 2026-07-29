@@ -1,4 +1,4 @@
-const STORAGE_KEY = "dm_analyst_console_v5";
+const STORAGE_KEY = "dm_analyst_console_v6";
 const POLL_INTERVAL_MS = 3000;
 
 const FILTER_VALUE_OPTIONS = {
@@ -6,10 +6,11 @@ const FILTER_VALUE_OPTIONS = {
   NCCS: ["A", "B"],
   Tier: ["Tier 1", "Tier 2", "Tier 3 & lower"],
   Gender: ["Male", "Female"],
-  "Age Band": ["Below 18", "18-24", "25-35", "35-44", "45-54", "55+"]
+  "Age Band": ["Below 18", "18-24", "25-35", "35-44", "45-54", "55+"],
+  Baseline: ["Overall"]
 };
 
-const PAGE_OPTIONS = ["Traffic Engagement", "Purchase Matrix", "Purchase Funnel"];
+const PAGE_OPTIONS = ["Traffic Engagement", "Purchase Matrix", "Purchase Funnel", "Baseline"];
 
 const state = {
   settings: {
@@ -37,7 +38,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   applyStateToDom();
   renderAll();
   await checkBackend();
-  await refreshRunHistory();
+  await refreshRunHistory(false);
   await refreshStatusForSelectedRun(false);
   await refreshReportForSelectedRun(false);
   renderAll();
@@ -247,7 +248,7 @@ function renderSelectedRunCard() {
   const run = selectedRun();
   if (!run) {
     setPill(els.selectedRunStatus, "No run", "muted");
-    els.selectedRunMeta.textContent = "The selected run will be used by Current, Report, and Ask.";
+    els.selectedRunMeta.textContent = "The selected run is used by Status, Report, and Ask.";
     return;
   }
 
@@ -265,7 +266,7 @@ function renderSelectedRunCard() {
 
   els.selectedRunMeta.innerHTML = `
     <div><strong>Date and time:</strong> ${escapeHtml(formatDateTime(run.finishedAt || run.createdAt))}</div>
-    <div><strong>Files:</strong> ${Number(run.fileCount || 0)} · <strong>Numeric rows:</strong> ${Number(run.numericRowCount || 0)} · <strong>Text rows:</strong> ${Number(run.textRowCount || 0)}</div>
+    <div><strong>Files:</strong> ${Number(run.fileCount || 0)} · <strong>Top insights:</strong> ${Number(run.topInsightCount || 0)} · <strong>Time hints:</strong> ${Number(run.timeHintCount || 0)}</div>
     <div><strong>Default target:</strong> This selected run is now used for status, report, and chat.</div>
   `;
 }
@@ -282,6 +283,7 @@ async function handleFilesSelected(event) {
       fileName: file.name,
       dataUrl,
       page: inferred.page,
+      comparisonMode: inferred.comparisonMode,
       filterType: inferred.filterType,
       filterValue: inferred.filterValue,
       note: ""
@@ -303,14 +305,18 @@ function inferTagsFromFilename(fileName) {
   else if (/\bpurchase\s+funnel\b/.test(normalized)) page = "Purchase Funnel";
   else if (/\btraffic\s+engagement\b/.test(normalized)) page = "Traffic Engagement";
 
-  let filterType = "Zone";
-  if (/\bzone\b/.test(normalized)) filterType = "Zone";
-  else if (/\bnccs\b/.test(normalized)) filterType = "NCCS";
-  else if (/\btier\b/.test(normalized)) filterType = "Tier";
-  else if (/\bgender\b/.test(normalized)) filterType = "Gender";
-  else if (/\bage\s*band\b/.test(normalized) || /\bage\b/.test(normalized)) filterType = "Age Band";
+  let comparisonMode = /\bbaseline\b|\boverall\b/.test(normalized) ? "baseline" : "cut";
+  let filterType = comparisonMode === "baseline" ? "Baseline" : "Zone";
 
-  return { page, filterType, filterValue: inferFilterValue(normalized, filterType) };
+  if (comparisonMode !== "baseline") {
+    if (/\bzone\b/.test(normalized)) filterType = "Zone";
+    else if (/\bnccs\b/.test(normalized)) filterType = "NCCS";
+    else if (/\btier\b/.test(normalized)) filterType = "Tier";
+    else if (/\bgender\b/.test(normalized)) filterType = "Gender";
+    else if (/\bage\s*band\b/.test(normalized) || /\bage\b/.test(normalized)) filterType = "Age Band";
+  }
+
+  return { page, comparisonMode, filterType, filterValue: inferFilterValue(normalized, comparisonMode, filterType) };
 }
 
 function normalizeFileName(fileName) {
@@ -322,7 +328,8 @@ function normalizeFileName(fileName) {
     .trim();
 }
 
-function inferFilterValue(normalized, filterType) {
+function inferFilterValue(normalized, comparisonMode, filterType) {
+  if (comparisonMode === "baseline") return "Overall";
   if (filterType === "Zone") {
     if (/\beast\b/.test(normalized)) return "East";
     if (/\bnorth\b/.test(normalized)) return "North";
@@ -388,7 +395,8 @@ function renderQueue() {
   els.carouselThumbs.innerHTML = state.queue.map((queueItem, index) => `
     <button class="thumb ${index === state.carouselIndex ? "active" : ""}" data-queue-index="${index}">
       <div>${escapeHtml(shorten(queueItem.fileName, 18))}</div>
-      <div>${escapeHtml(queueItem.filterType)} · ${escapeHtml(queueItem.filterValue)}</div>
+      <div>${escapeHtml(queueItem.page)}</div>
+      <div>${queueItem.comparisonMode === "baseline" ? '<span class="badge badge-baseline">Baseline</span>' : '<span class="badge badge-cut">Cut</span>'}</div>
     </button>
   `).join("");
 
@@ -396,6 +404,12 @@ function renderQueue() {
     input.addEventListener("change", async (event) => {
       const field = event.target.dataset.field;
       state.queue[state.carouselIndex][field] = event.target.value;
+      if (field === "comparisonMode") {
+        const mode = event.target.value;
+        state.queue[state.carouselIndex].comparisonMode = mode;
+        state.queue[state.carouselIndex].filterType = mode === "baseline" ? "Baseline" : "Zone";
+        state.queue[state.carouselIndex].filterValue = mode === "baseline" ? "Overall" : "East";
+      }
       if (field === "filterType") {
         state.queue[state.carouselIndex].filterValue = FILTER_VALUE_OPTIONS[event.target.value]?.[0] || "";
       }
@@ -424,7 +438,11 @@ function renderQueue() {
 }
 
 function createQueueCardHtml(item) {
-  const pageOptions = PAGE_OPTIONS.map((option) => `<option value="${escapeAttr(option)}" ${option === item.page ? "selected" : ""}>${escapeHtml(option)}</option>`).join("");
+  const pageOptions = PAGE_OPTIONS.filter((v) => v !== "Baseline").map((option) => `<option value="${escapeAttr(option)}" ${option === item.page ? "selected" : ""}>${escapeHtml(option)}</option>`).join("");
+  const comparisonOptions = [
+    `<option value="baseline" ${item.comparisonMode === "baseline" ? "selected" : ""}>Baseline</option>`,
+    `<option value="cut" ${item.comparisonMode === "cut" ? "selected" : ""}>Filtered cut</option>`
+  ].join("");
   const filterTypeOptions = Object.keys(FILTER_VALUE_OPTIONS).map((option) => `<option value="${escapeAttr(option)}" ${option === item.filterType ? "selected" : ""}>${escapeHtml(option)}</option>`).join("");
   const filterValueOptions = (FILTER_VALUE_OPTIONS[item.filterType] || []).map((option) => `<option value="${escapeAttr(option)}" ${option === item.filterValue ? "selected" : ""}>${escapeHtml(option)}</option>`).join("");
 
@@ -432,13 +450,16 @@ function createQueueCardHtml(item) {
     <div class="queue-top">
       <div>
         <div class="queue-name">${escapeHtml(item.fileName)}</div>
-        <div class="queue-subtext">Tags are auto-filled from the filename. Adjust only if needed.</div>
+        <div class="queue-subtext">Choose the page family and whether this is the baseline or a filtered cut.</div>
       </div>
       <button class="btn btn-secondary" data-action="delete-queue-item">Remove</button>
     </div>
     <img class="preview-img" src="${item.dataUrl}" alt="${escapeAttr(item.fileName)}" />
+    <div class="comparison-row">
+      <label><span>Page family</span><select data-field="page">${pageOptions}</select></label>
+      <label><span>Comparison mode</span><select data-field="comparisonMode">${comparisonOptions}</select></label>
+    </div>
     <div class="queue-grid">
-      <label><span>Page</span><select data-field="page">${pageOptions}</select></label>
       <label><span>Filter type</span><select data-field="filterType">${filterTypeOptions}</select></label>
       <label><span>Filter value</span><select data-field="filterValue">${filterValueOptions}</select></label>
     </div>
@@ -472,7 +493,7 @@ async function analyzeScreenshots() {
         <div><strong>What is happening:</strong> uploading screenshot ${i + 1} of ${state.queue.length}</div>
         <div class="progress-grid">
           <div class="progress-item"><div class="progress-label">Current file</div><div class="progress-value">${escapeHtml(item.fileName)}</div></div>
-          <div class="progress-item"><div class="progress-label">Estimated time remaining</div><div class="progress-value">Calculating...</div></div>
+          <div class="progress-item"><div class="progress-label">Page context</div><div class="progress-value">${escapeHtml(item.page)} · ${item.comparisonMode === "baseline" ? "Baseline" : `${item.filterType}: ${item.filterValue}`}</div></div>
         </div>
       `;
       await apiPost("/analyst/upload/file", {
@@ -480,6 +501,7 @@ async function analyzeScreenshots() {
         runId,
         fileName: item.fileName,
         page: item.page,
+        comparisonMode: item.comparisonMode,
         filterType: item.filterType,
         filterValue: item.filterValue,
         note: item.note,
@@ -560,11 +582,9 @@ function renderAnalysisStatus() {
   const label = status === "completed" ? (state.latestStatus?.hasUsableData ? "Ready" : "Needs review") : capitalize(status);
   const tone = status === "completed"
     ? (state.latestStatus?.hasUsableData ? "success" : "danger")
-    : status === "failed"
-      ? "danger"
-      : ["queued", "extracting", "collecting", "upload_complete", "started"].includes(status)
-        ? "warning"
-        : "muted";
+    : status === "failed" ? "danger"
+    : ["queued", "extracting", "collecting", "upload_complete", "started"].includes(status) ? "warning"
+    : "muted";
   setPill(els.analysisStatus, label, tone);
 
   if (!state.selectedRunId) {
@@ -585,8 +605,8 @@ function renderAnalysisStatus() {
       <div class="progress-item"><div class="progress-label">Current file</div><div class="progress-value">${escapeHtml(progress?.currentFileName || "—")}</div></div>
       <div class="progress-item"><div class="progress-label">File progress</div><div class="progress-value">${escapeHtml(formatRatio(progress?.currentFileIndex, progress?.totalFiles))}</div></div>
       <div class="progress-item"><div class="progress-label">Slice progress</div><div class="progress-value">${escapeHtml(formatRatio(progress?.currentSliceIndex, progress?.totalSlicesForFile))}</div></div>
-      <div class="progress-item"><div class="progress-label">Processed slices</div><div class="progress-value">${escapeHtml(formatRatio(progress?.processedSlices, progress?.totalSlices))}</div></div>
-      <div class="progress-item"><div class="progress-label">Batch progress</div><div class="progress-value">${escapeHtml(formatRatio(progress?.currentBatchIndex, progress?.totalBatches))}</div></div>
+      <div class="progress-item"><div class="progress-label">Time hints</div><div class="progress-value">${Number(state.latestStatus.timeHintCount || 0)}</div></div>
+      <div class="progress-item"><div class="progress-label">Top insights</div><div class="progress-value">${Number(state.latestStatus.topInsightCount || 0)}</div></div>
     </div>
     <div style="margin-top:10px;"><strong>Usable data:</strong> ${state.latestStatus.hasUsableData ? "Yes" : "No"} · <strong>Numeric rows:</strong> ${Number(state.latestStatus.numericRowCount || 0)} · <strong>Text rows:</strong> ${Number(state.latestStatus.textRowCount || 0)}</div>
     ${state.latestStatus.error ? `<div style="margin-top:10px;"><strong>Error:</strong> ${escapeHtml(state.latestStatus.error)}</div>` : ""}
@@ -637,23 +657,23 @@ function renderReport() {
 
   if (!report.hasUsableData) {
     setPill(els.reportStatus, "Needs review", "danger");
-    els.reportContainer.innerHTML = `
-      <div class="report-section">
-        <h3>Usable-data check failed</h3>
-        <div class="report-summary">This run finished technically, but there is not enough extracted data yet to support a reliable report.</div>
-      </div>
-    `;
+    els.reportContainer.innerHTML = `<div class="report-section"><h3>Usable-data check failed</h3><div class="report-summary">This run finished technically, but there is not enough extracted data to support a reliable report.</div></div>`;
     els.openReportLink.href = buildUrl(`/analyst/report/html?workspaceName=${encodeURIComponent(workspaceName())}&runId=${encodeURIComponent(run.runId)}`);
     return;
   }
 
   setPill(els.reportStatus, "Ready", "success");
   els.openReportLink.href = buildUrl(`/analyst/report/html?workspaceName=${encodeURIComponent(workspaceName())}&runId=${encodeURIComponent(run.runId)}`);
+
+  const topInsights = Array.isArray(report.report?.top_insights) ? report.report.top_insights : [];
   els.reportContainer.innerHTML = `
-    <div class="report-section"><h3>${escapeHtml(report.report?.title || "Analyst Report")}</h3><div class="report-summary">${escapeHtml(report.summary || "")}</div></div>
+    <div class="report-section">
+      <h3>${escapeHtml(report.report?.title || "Executive Summary")}</h3>
+      <div class="report-summary">${escapeHtml(report.summary || "")}</div>
+    </div>
     ${renderListSection("Executive Summary", report.report?.executive_summary || [])}
-    ${renderListSection("Key Findings", report.report?.key_findings || [])}
-    ${renderListSection("Recommendations", report.report?.recommendations || [])}
+    ${renderInsights(topInsights)}
+    ${renderListSection("Recommended Actions", report.report?.recommended_actions || [])}
     ${renderListSection("Data Quality Notes", report.report?.data_quality_notes || [])}
   `;
 }
@@ -663,6 +683,26 @@ function renderListSection(title, items) {
     <div class="report-section">
       <h3>${escapeHtml(title)}</h3>
       ${items.length ? `<ul>${items.map((item) => `<li>${escapeHtml(String(item))}</li>`).join("")}</ul>` : `<div class="muted">No items</div>`}
+    </div>
+  `;
+}
+
+function renderInsights(items) {
+  if (!items.length) return `<div class="report-section"><h3>Top 4 Priority Insights</h3><div class="muted">No ranked insights available.</div></div>`;
+  return `
+    <div class="report-section">
+      <h3>Top 4 Priority Insights</h3>
+      ${items.map((item, index) => `
+        <div class="insight-card">
+          <div class="insight-rank">Priority ${index + 1}</div>
+          <h4>${escapeHtml(item.title || "Untitled insight")}</h4>
+          <div class="insight-meta">Severity: ${escapeHtml(item.severity || "")} · Score: ${Number(item.priority_score || 0)}</div>
+          <div class="report-summary">${escapeHtml(item.why_it_matters || "")}</div>
+          ${Array.isArray(item.evidence) && item.evidence.length ? `<ul>${item.evidence.map((ev) => `<li>${escapeHtml(String(ev))}</li>`).join("")}</ul>` : ""}
+          ${item.recommended_action ? `<div class="report-summary"><strong>Action:</strong> ${escapeHtml(item.recommended_action)}</div>` : ""}
+          ${item.chart_recommendation ? `<div class="report-summary"><strong>Suggested visual:</strong> ${escapeHtml(item.chart_recommendation)}</div>` : ""}
+        </div>
+      `).join("")}
     </div>
   `;
 }
@@ -687,19 +727,19 @@ function renderChatArea() {
   `;
 
   if (!usable) {
-    els.chatMessages.innerHTML = `<div class="chat-message assistant"><div class="chat-meta">${escapeHtml(formatDateTime(new Date().toISOString()))}</div><div class="chat-content">This run is blocked for chat because the usable-data check failed. Select another run or retry analysis.</div></div>`;
+    els.chatMessages.innerHTML = `<div class="chat-message assistant"><div class="chat-content">This run is blocked for chat because the usable-data check failed. Select another run or retry analysis.</div><div class="chat-meta">${escapeHtml(formatDateTime(new Date().toISOString()))}</div></div>`;
     return;
   }
 
   if (!messages.length) {
-    els.chatMessages.innerHTML = `<div class="chat-message assistant"><div class="chat-meta">${escapeHtml(formatDateTime(new Date().toISOString()))}</div><div class="chat-content">I’m ready to answer questions about this selected run and continue from the latest saved context.</div></div>`;
+    els.chatMessages.innerHTML = `<div class="chat-message assistant"><div class="chat-content">I’m ready to answer questions using the baseline vs cut analysis and the ranked top 4 insights for this run.</div><div class="chat-meta">${escapeHtml(formatDateTime(new Date().toISOString()))}</div></div>`;
     return;
   }
 
   els.chatMessages.innerHTML = messages.map((message) => `
     <div class="chat-message ${message.role === "user" ? "user" : "assistant"}">
-      <div class="chat-meta">${escapeHtml(formatDateTime(message.createdAt))}</div>
       <div class="chat-content">${escapeHtml(message.content)}</div>
+      <div class="chat-meta">${escapeHtml(formatDateTime(message.createdAt))}</div>
     </div>
   `).join("");
   els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
@@ -726,11 +766,7 @@ async function sendChatMessage() {
       question
     });
 
-    state.chatByRun[run.runId].push({
-      role: "assistant",
-      content: data.answer || "No answer returned.",
-      createdAt: new Date().toISOString()
-    });
+    state.chatByRun[run.runId].push({ role: "assistant", content: data.answer || "No answer returned.", createdAt: new Date().toISOString() });
     await persistState();
     renderChatArea();
   } catch (error) {
