@@ -26,13 +26,30 @@ router.post("/upload/start", (req, res) => {
 
 router.post("/upload/file", (req, res) => {
   try {
-    const { workspaceName, runId, fileName, page, filterType, filterValue, note, dataUrl } = req.body || {};
+    const { workspaceName, runId, fileName, page, comparisonMode, filterType, filterValue, note, dataUrl } = req.body || {};
     if (!workspaceName) return res.status(400).json({ ok: false, error: "workspaceName is required" });
     if (!runId) return res.status(400).json({ ok: false, error: "runId is required" });
     if (!dataUrl) return res.status(400).json({ ok: false, error: "dataUrl is required" });
+    if (!page) return res.status(400).json({ ok: false, error: "page is required" });
 
-    const run = addFileToRun({ workspaceName, runId, fileName, page, filterType, filterValue, note, dataUrl });
-    return res.json({ ok: true, runId, fileCount: run.files.length, latestFile: run.files[run.files.length - 1] });
+    const run = addFileToRun({
+      workspaceName,
+      runId,
+      fileName,
+      page,
+      comparisonMode,
+      filterType,
+      filterValue,
+      note,
+      dataUrl
+    });
+
+    return res.json({
+      ok: true,
+      runId,
+      fileCount: run.files.length,
+      latestFile: run.files[run.files.length - 1]
+    });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message || "Failed to upload screenshot" });
   }
