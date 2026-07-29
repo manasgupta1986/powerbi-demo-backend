@@ -205,8 +205,24 @@ function updateRunStatus({ workspaceName, runId, status, error = null }) {
   const idx = runs.findIndex((run) => run.runId === runId);
   if (idx === -1) throw new Error("Run not found");
 
+  const statusMessages = {
+    started: "Run created",
+    collecting: "Collecting screenshots",
+    upload_complete: "Screenshots ready for analysis",
+    queued: "Queued for analysis",
+    extracting: "Starting extraction",
+    completed: "Analysis completed",
+    failed: error || "Analysis failed"
+  };
+
   runs[idx].status = status;
   runs[idx].error = error;
+  runs[idx].progress = {
+    ...(runs[idx].progress || defaultProgress()),
+    phase: status === "failed" ? "failed" : (runs[idx].progress?.phase || status),
+    message: error || runs[idx].progress?.message || statusMessages[status] || `Status: ${status}`,
+    updatedAt: new Date().toISOString()
+  };
   if (status === "failed") {
     runs[idx].progress = {
       ...(runs[idx].progress || defaultProgress()),
