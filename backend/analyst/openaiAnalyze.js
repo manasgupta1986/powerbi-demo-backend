@@ -7,6 +7,7 @@ const { createSlicesForImage } = require("./imageSlicer");
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1";
 const MAX_IMAGES_PER_BATCH = Math.max(1, Number(process.env.ANALYST_MAX_IMAGES_PER_BATCH || 3));
 const MAX_SLICES_PER_FILE = Math.max(1, Number(process.env.ANALYST_MAX_SLICES_PER_FILE || 6));
+const MAX_AXIS_SLICES_PER_FILE = Math.max(1, Number(process.env.ANALYST_MAX_AXIS_SLICES_PER_FILE || 3));
 const DEFAULT_VISION_MAX_WIDTH = Math.max(700, Number(process.env.ANALYST_VISION_MAX_WIDTH || 1100));
 const DEFAULT_VISION_DETAIL = process.env.ANALYST_VISION_DETAIL || "low";
 const EST_SECONDS_PER_SLICE = Math.max(3, Number(process.env.ANALYST_EST_SECONDS_PER_SLICE || 8));
@@ -15,33 +16,39 @@ const EST_SECONDS_FOR_SUMMARY = Math.max(4, Number(process.env.ANALYST_EST_SECON
 const DEFAULT_ANALYSIS_PROMPT = `
 You are analyzing tagged dashboard screenshots from a business intelligence workflow.
 
-Important operating rules:
-- the backend may split each tall dashboard screenshot into multiple focused chart slices
-- each slice belongs to one original screenshot and carries metadata
-- estimate values visually when labels are missing, but do not invent unsupported precision
-- avoid duplicate rows when overlapping slices show the same chart area
-- use the client/platform name when forming insights for CMI and category leads
-- do not mention any dimension that is not visibly present in the supplied screenshots
-- if category data is not visible, do not mention category insights
-- if week labels are visible, preserve them faithfully
-
-Week mapping rule:
-- when a chart uses labels such as "2026-W1 – 19/12/2025", interpret the date after the dash as the week start date
-- preserve both the week label and the week start date when visible
-- if subsequent week labels continue in the same visible pattern, treat them as +7 day intervals only when the sequence is visually supported by the chart
-- if the sequence is not visually clear, say so in notes rather than guessing
-
-Insight rule:
-- key findings and recommendations must be insights, not simple chart reading
-- move from observation to implication: what is changing, why it matters, where to act
-- if evidence is thin, say that clearly instead of overstating
+Core principles:
+- Screenshots belong to page families such as Traffic Engagement or Purchase Funnel.
+- Some screenshots are baseline views. Other screenshots are filtered cuts.
+- Always understand the baseline first, then compare filtered cuts against that baseline.
+- Do not hardcode a fixed narrative template. Instead, identify the most important problems visible in the evidence.
+- Surface the top 4 highest-priority insights based on business impact, recent deterioration, competitive threat, breadth across cuts, and confidence.
+- Key findings must be insight-led, not chart narration.
+- Do not hallucinate categories, cohorts, or dimensions that are not visible.
+- Preserve visible week labels and week start dates when present.
 
 Return only valid JSON using this structure:
 {
+  "time_hints": [
+    {
+      "source_file": "",
+      "page": "",
+      "filter_type": "",
+      "filter_value": "",
+      "visible_weeks": [
+        {
+          "week_label": "",
+          "week_start_date": "",
+          "confidence": "",
+          "notes": ""
+        }
+      ]
+    }
+  ],
   "numeric_rows": [
     {
       "source_file": "",
       "page": "",
+      "comparison_mode": "",
       "filter_type": "",
       "filter_value": "",
       "time_period": "",
@@ -57,6 +64,7 @@ Return only valid JSON using this structure:
     {
       "source_file": "",
       "page": "",
+      "comparison_mode": "",
       "filter_type": "",
       "filter_value": "",
       "time_period": "",
@@ -70,35 +78,62 @@ Return only valid JSON using this structure:
   "report": {
     "title": "",
     "executive_summary": [],
-    "key_findings": [],
-    "recommendations": [],
+    "top_insights": [
+      {
+        "title": "",
+        "priority_score": 0,
+        "severity": "",
+        "why_it_matters": "",
+        "evidence": [],
+        "recommended_action": "",
+        "chart_recommendation": ""
+      }
+    ],
+    "recommended_actions": [],
     "data_quality_notes": []
   }
 }
 `.trim();
 
-function ensureArray(value) {
-  return Array.isArray(value) ? value : [];
-}
-
-function ensureString(value) {
-  return typeof value === "string" ? value : "";
-}
+function ensureArray(value) { return Array.isArray(value) ? value : []; }
+function ensureString(value) { return typeof value === "string" ? value : ""; }
+function ensureNumber(value) { return Number.isFinite(Number(value)) ? Number(value) : 0; }
 
 function normalizeReport(report) {
   const safe = report && typeof report === "object" ? report : {};
   return {
     title: ensureString(safe.title),
     executive_summary: ensureArray(safe.executive_summary).map(String),
-    key_findings: ensureArray(safe.key_findings).map(String),
-    recommendations: ensureArray(safe.recommendations).map(String),
+    top_insights: ensureArray(safe.top_insights).map((item) => ({
+      title: ensureString(item.title),
+      priority_score: ensureNumber(item.priority_score),
+      severity: ensureString(item.severity),
+      why_it_matters: ensureString(item.why_it_matters),
+      evidence: ensureArray(item.evidence).map(String),
+      recommended_action: ensureString(item.recommended_action),
+      chart_recommendation: ensureString(item.chart_recommendation)
+    })).slice(0, 4),
+    recommended_actions: ensureArray(safe.recommended_actions).map(String),
     data_quality_notes: ensureArray(safe.data_quality_notes).map(String)
   };
 }
 
-function normalizeRows(rows, mapper) {
-  return ensureArray(rows).map(mapper);
+function normalizeTimeHints(hints) {
+  return ensureArray(hints).map((hint) => ({
+    source_file: ensureString(hint.source_file),
+    page: ensureString(hint.page),
+    filter_type: ensureString(hint.filter_type),
+    filter_value: ensureString(hint.filter_value),
+    visible_weeks: ensureArray(hint.visible_weeks).map((item) => ({
+      week_label: ensureString(item.week_label),
+      week_start_date: ensureString(item.week_start_date),
+      confidence: ensureString(item.confidence),
+      notes: ensureString(item.notes)
+    }))
+  }));
 }
+
+function normalizeRows(rows, mapper) { return ensureArray(rows).map(mapper); }
 
 function normalizeAnalysis(raw, run) {
   const safe = raw && typeof raw === "object" ? raw : {};
@@ -107,9 +142,11 @@ function normalizeAnalysis(raw, run) {
     workspaceName: run.workspaceName,
     clientName: ensureString(run.clientName),
     createdAt: new Date().toISOString(),
+    time_hints: normalizeTimeHints(safe.time_hints),
     numeric_rows: normalizeRows(safe.numeric_rows, (row) => ({
       source_file: ensureString(row.source_file),
       page: ensureString(row.page),
+      comparison_mode: ensureString(row.comparison_mode),
       filter_type: ensureString(row.filter_type),
       filter_value: ensureString(row.filter_value),
       time_period: ensureString(row.time_period),
@@ -123,6 +160,7 @@ function normalizeAnalysis(raw, run) {
     text_rows: normalizeRows(safe.text_rows, (row) => ({
       source_file: ensureString(row.source_file),
       page: ensureString(row.page),
+      comparison_mode: ensureString(row.comparison_mode),
       filter_type: ensureString(row.filter_type),
       filter_value: ensureString(row.filter_value),
       time_period: ensureString(row.time_period),
@@ -137,9 +175,8 @@ function normalizeAnalysis(raw, run) {
 }
 
 function parseJsonSafe(text) {
-  try {
-    return JSON.parse(text);
-  } catch {
+  try { return JSON.parse(text); }
+  catch {
     const match = String(text || "").match(/\{[\s\S]*\}/);
     if (!match) throw new Error("OpenAI response was not valid JSON");
     return JSON.parse(match[0]);
@@ -189,18 +226,28 @@ function limitSlicesPerFile(sliceInputs) {
     if (!grouped.has(key)) grouped.set(key, []);
     grouped.get(key).push(slice);
   }
-
   const limited = [];
   for (const slices of grouped.values()) {
     slices.sort((a, b) => a.sliceIndex - b.sliceIndex);
     limited.push(...selectEvenlySpaced(slices, MAX_SLICES_PER_FILE));
   }
-
-  limited.sort((a, b) => {
-    if (a.sourceFile === b.sourceFile) return a.sliceIndex - b.sliceIndex;
-    return String(a.sourceFile).localeCompare(String(b.sourceFile));
-  });
+  limited.sort((a, b) => a.sourceFile === b.sourceFile ? a.sliceIndex - b.sliceIndex : String(a.sourceFile).localeCompare(String(b.sourceFile)));
   return limited;
+}
+
+function axisSlicesPerFile(sliceInputs) {
+  const grouped = new Map();
+  for (const slice of sliceInputs) {
+    const key = slice.sourceFile || slice.slicePath;
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(slice);
+  }
+  const selected = [];
+  for (const slices of grouped.values()) {
+    slices.sort((a, b) => a.sliceIndex - b.sliceIndex);
+    selected.push(...selectEvenlySpaced(slices, MAX_AXIS_SLICES_PER_FILE));
+  }
+  return selected;
 }
 
 async function imagePathToDataUrl(filePath, maxWidth, detailMode) {
@@ -208,9 +255,7 @@ async function imagePathToDataUrl(filePath, maxWidth, detailMode) {
   let mime = "image/jpeg";
   let pipeline = sharp(filePath).rotate();
   const meta = await pipeline.metadata();
-  if (meta.width && meta.width > maxWidth) {
-    pipeline = pipeline.resize({ width: maxWidth, withoutEnlargement: true });
-  }
+  if (meta.width && meta.width > maxWidth) pipeline = pipeline.resize({ width: maxWidth, withoutEnlargement: true });
   if (ext === ".png") {
     pipeline = pipeline.png({ compressionLevel: detailMode === "low" ? 9 : 6, quality: detailMode === "low" ? 70 : 85 });
     mime = "image/png";
@@ -233,43 +278,48 @@ function buildEstimatedSeconds(totalSlices, processedSlices, totalBatches, curre
   return base + EST_SECONDS_FOR_SUMMARY;
 }
 
+function inferPageGroups(files) {
+  const map = new Map();
+  for (const file of files) {
+    const key = file.page || "Unknown";
+    if (!map.has(key)) map.set(key, { page: key, baseline: null, cuts: [] });
+    const group = map.get(key);
+    if (file.comparisonMode === "baseline" && !group.baseline) group.baseline = file;
+    else group.cuts.push(file);
+  }
+  return Array.from(map.values());
+}
+
 async function buildSliceInputs(run, workspaceName) {
   const slices = [];
   const totalFiles = Array.isArray(run.files) ? run.files.length : 0;
 
   for (let fileIndex = 0; fileIndex < totalFiles; fileIndex += 1) {
     const file = run.files[fileIndex];
-    updateRunProgress({
-      workspaceName,
-      runId: run.runId,
-      progress: {
-        phase: "slicing",
-        message: `Slicing ${file.fileName}`,
-        currentFileName: file.fileName,
-        currentFileIndex: fileIndex + 1,
-        totalFiles,
-        currentSliceIndex: 0,
-        totalSlicesForFile: 0,
-        processedSlices: slices.length,
-        totalSlices: slices.length,
-        currentBatchIndex: 0,
-        totalBatches: 0,
-        estimatedSecondsRemaining: buildEstimatedSeconds(slices.length + 1, 0, 0, "slicing")
-      }
-    });
+    updateRunProgress({ workspaceName, runId: run.runId, progress: {
+      phase: "slicing",
+      message: `Slicing ${file.fileName}`,
+      currentFileName: file.fileName,
+      currentFileIndex: fileIndex + 1,
+      totalFiles,
+      currentSliceIndex: 0,
+      totalSlicesForFile: 0,
+      processedSlices: slices.length,
+      totalSlices: slices.length,
+      currentBatchIndex: 0,
+      totalBatches: 0,
+      estimatedSecondsRemaining: buildEstimatedSeconds(slices.length + 1, 0, 0, "slicing")
+    }});
 
     const fileDir = path.dirname(file.imagePath);
     const sliceOutputDir = path.join(fileDir, "slices", path.parse(file.storedFileName || file.fileName || "upload").name);
-    const sliced = await createSlicesForImage({
-      imagePath: file.imagePath,
-      outputDir: sliceOutputDir,
-      prefix: path.parse(file.storedFileName || file.fileName || "upload").name
-    });
+    const sliced = await createSlicesForImage({ imagePath: file.imagePath, outputDir: sliceOutputDir, prefix: path.parse(file.storedFileName || file.fileName || "upload").name });
 
     for (const slice of sliced.slices) {
       slices.push({
         sourceFile: file.fileName,
         page: file.page,
+        comparisonMode: file.comparisonMode,
         filterType: file.filterType,
         filterValue: file.filterValue,
         note: file.note || "",
@@ -282,24 +332,20 @@ async function buildSliceInputs(run, workspaceName) {
       });
     }
 
-    updateRunProgress({
-      workspaceName,
-      runId: run.runId,
-      progress: {
-        phase: "slicing",
-        message: `Created ${sliced.sliceCount} slice(s) for ${file.fileName}`,
-        currentFileName: file.fileName,
-        currentFileIndex: fileIndex + 1,
-        totalFiles,
-        currentSliceIndex: sliced.sliceCount,
-        totalSlicesForFile: sliced.sliceCount,
-        processedSlices: slices.length,
-        totalSlices: slices.length,
-        currentBatchIndex: 0,
-        totalBatches: 0,
-        estimatedSecondsRemaining: buildEstimatedSeconds(slices.length, 0, 0, "slicing")
-      }
-    });
+    updateRunProgress({ workspaceName, runId: run.runId, progress: {
+      phase: "slicing",
+      message: `Created ${sliced.sliceCount} slice(s) for ${file.fileName}`,
+      currentFileName: file.fileName,
+      currentFileIndex: fileIndex + 1,
+      totalFiles,
+      currentSliceIndex: sliced.sliceCount,
+      totalSlicesForFile: sliced.sliceCount,
+      processedSlices: slices.length,
+      totalSlices: slices.length,
+      currentBatchIndex: 0,
+      totalBatches: 0,
+      estimatedSecondsRemaining: buildEstimatedSeconds(slices.length, 0, 0, "slicing")
+    }});
   }
 
   return limitSlicesPerFile(slices);
@@ -308,18 +354,9 @@ async function buildSliceInputs(run, workspaceName) {
 async function callOpenAIJson({ apiKey, messages }) {
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({
-      model: OPENAI_MODEL,
-      temperature: 0.1,
-      response_format: { type: "json_object" },
-      messages
-    })
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({ model: OPENAI_MODEL, temperature: 0.1, response_format: { type: "json_object" }, messages })
   });
-
   const raw = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(raw?.error?.message || "OpenAI request failed");
   const content = raw?.choices?.[0]?.message?.content;
@@ -332,31 +369,67 @@ function isTooLargeError(error) {
   return message.includes("request too large") || message.includes("tokens per min") || message.includes("too many tokens");
 }
 
-async function extractBatchOnce({ apiKey, batch, promptText, detailMode, maxWidth, batchIndex, batchCount, run, workspaceName, processedSlicesBeforeBatch, totalSlices }) {
+async function extractAxisHints({ apiKey, run, slices, workspaceName }) {
+  const axisSlices = axisSlicesPerFile(slices);
+  if (!axisSlices.length) return [];
+
+  updateRunProgress({ workspaceName, runId: run.runId, progress: {
+    phase: "axis_read",
+    message: "Reading visible week labels from chart axes",
+    currentFileName: axisSlices[0]?.sourceFile || null,
+    currentFileIndex: axisSlices[0]?.fileIndex || 0,
+    totalFiles: run.files.length,
+    currentSliceIndex: axisSlices[0]?.sliceIndex || 0,
+    totalSlicesForFile: axisSlices[0]?.totalSlicesForFile || 0,
+    processedSlices: 0,
+    totalSlices: axisSlices.length,
+    currentBatchIndex: 0,
+    totalBatches: 1,
+    estimatedSecondsRemaining: Math.max(6, axisSlices.length * 4)
+  }});
+
+  const content = [{ type: "text", text: [
+    "Read only visible weekly labels from these chart slices.",
+    "Focus on labels such as YYYY-Wnn and any visible week start dates following a dash.",
+    "Return JSON only using this structure:",
+    '{"time_hints":[{"source_file":"","page":"","filter_type":"","filter_value":"","visible_weeks":[{"week_label":"","week_start_date":"","confidence":"","notes":""}]}]}'
+  ].join("\n") }];
+
+  for (const slice of axisSlices) {
+    content.push({ type: "text", text: `source_file=${slice.sourceFile} page=${slice.page} comparison_mode=${slice.comparisonMode} filter_type=${slice.filterType} filter_value=${slice.filterValue} slice_label=${slice.sliceLabel}` });
+    content.push({ type: "image_url", image_url: { url: await imagePathToDataUrl(slice.slicePath, 1200, "low"), detail: "low" } });
+  }
+
+  const parsed = await callOpenAIJson({ apiKey, messages: [
+    { role: "system", content: "You read time-axis labels from dashboard chart screenshots. Extract only visible weekly labels and week start dates. Return JSON only." },
+    { role: "user", content }
+  ]});
+
+  return normalizeTimeHints(parsed.time_hints || []);
+}
+
+async function extractBatchOnce({ apiKey, batch, promptText, detailMode, maxWidth, batchIndex, batchCount, run, workspaceName, processedSlicesBeforeBatch, totalSlices, timeHints, pageGroups }) {
   const first = batch[0];
-  updateRunProgress({
-    workspaceName,
-    runId: run.runId,
-    progress: {
-      phase: "extracting",
-      message: `Extracting batch ${batchIndex} of ${batchCount} from ${first.sourceFile}`,
-      currentFileName: first.sourceFile,
-      currentFileIndex: first.fileIndex,
-      totalFiles: first.totalFiles,
-      currentSliceIndex: first.sliceIndex,
-      totalSlicesForFile: first.totalSlicesForFile,
-      processedSlices: processedSlicesBeforeBatch,
-      totalSlices,
-      currentBatchIndex: batchIndex,
-      totalBatches: batchCount,
-      estimatedSecondsRemaining: buildEstimatedSeconds(totalSlices, processedSlicesBeforeBatch, batchCount, "extracting")
-    }
-  });
+  updateRunProgress({ workspaceName, runId: run.runId, progress: {
+    phase: "extracting",
+    message: `Extracting batch ${batchIndex} of ${batchCount} from ${first.sourceFile}`,
+    currentFileName: first.sourceFile,
+    currentFileIndex: first.fileIndex,
+    totalFiles: first.totalFiles,
+    currentSliceIndex: first.sliceIndex,
+    totalSlicesForFile: first.totalSlicesForFile,
+    processedSlices: processedSlicesBeforeBatch,
+    totalSlices,
+    currentBatchIndex: batchIndex,
+    totalBatches: batchCount,
+    estimatedSecondsRemaining: buildEstimatedSeconds(totalSlices, processedSlicesBeforeBatch, batchCount, "extracting")
+  }});
 
   const metadataLines = batch.map((slice, index) => [
     `${index + 1}.`,
     `source_file=${slice.sourceFile}`,
     `page=${slice.page}`,
+    `comparison_mode=${slice.comparisonMode}`,
     `filter_type=${slice.filterType}`,
     `filter_value=${slice.filterValue}`,
     `slice_label=${slice.sliceLabel}`,
@@ -365,176 +438,108 @@ async function extractBatchOnce({ apiKey, batch, promptText, detailMode, maxWidt
     `note=${slice.note || ""}`
   ].join(" ")).join("\n");
 
-  const userContent = [{
-    type: "text",
-    text: [
-      promptText,
-      "",
-      `Client/platform name: ${run.clientName || "Not provided"}`,
-      `This is extraction batch ${batchIndex} of ${batchCount}.`,
-      "Return JSON only.",
-      "Focus on rows visible in these images only.",
-      "Do not mention any category, cohort, or dimension unless it is visibly present in the provided chart slices.",
-      "Slice metadata:",
-      metadataLines
-    ].join("\n")
-  }];
+  const userContent = [{ type: "text", text: [
+    promptText,
+    "",
+    `Client/platform name: ${run.clientName || "Not provided"}`,
+    `This is extraction batch ${batchIndex} of ${batchCount}.`,
+    "Return JSON only.",
+    "Focus on rows visible in these images only.",
+    "Use baseline screenshots as the anchor for interpreting filtered cuts under the same page.",
+    "Do not mention dimensions that are not visibly present.",
+    "Page grouping context:",
+    JSON.stringify(pageGroups, null, 2),
+    "Axis week hints already detected:",
+    JSON.stringify(timeHints, null, 2),
+    "Slice metadata:",
+    metadataLines
+  ].join("\n") }];
 
   for (const slice of batch) {
-    userContent.push({
-      type: "image_url",
-      image_url: {
-        url: await imagePathToDataUrl(slice.slicePath, maxWidth, detailMode),
-        detail: detailMode
-      }
-    });
+    userContent.push({ type: "image_url", image_url: { url: await imagePathToDataUrl(slice.slicePath, maxWidth, detailMode), detail: detailMode } });
   }
 
-  return callOpenAIJson({
-    apiKey,
-    messages: [
-      {
-        role: "system",
-        content: "You are a meticulous BI analyst. Extract only visually supported values from the provided chart slices. Estimate cautiously when exact labels are not visible. Preserve week labels and week start dates when visible. Do not hallucinate missing dimensions. Return JSON only."
-      },
-      { role: "user", content: userContent }
-    ]
-  });
+  return callOpenAIJson({ apiKey, messages: [
+    { role: "system", content: "You are a meticulous BI analyst. Extract only visually supported values from the provided chart slices. Preserve baseline-vs-cut context, week labels, and visible dimensions only. Return JSON only." },
+    { role: "user", content: userContent }
+  ]});
 }
 
-async function extractBatchAdaptive({ apiKey, batch, promptText, batchIndex, batchCount, run, workspaceName, processedSlicesBeforeBatch, totalSlices }) {
+async function extractBatchAdaptive({ apiKey, batch, promptText, batchIndex, batchCount, run, workspaceName, processedSlicesBeforeBatch, totalSlices, timeHints, pageGroups }) {
   try {
-    return await extractBatchOnce({
-      apiKey,
-      batch,
-      promptText,
-      detailMode: DEFAULT_VISION_DETAIL,
-      maxWidth: DEFAULT_VISION_MAX_WIDTH,
-      batchIndex,
-      batchCount,
-      run,
-      workspaceName,
-      processedSlicesBeforeBatch,
-      totalSlices
-    });
+    return await extractBatchOnce({ apiKey, batch, promptText, detailMode: DEFAULT_VISION_DETAIL, maxWidth: DEFAULT_VISION_MAX_WIDTH, batchIndex, batchCount, run, workspaceName, processedSlicesBeforeBatch, totalSlices, timeHints, pageGroups });
   } catch (error) {
     if (!isTooLargeError(error)) throw error;
-
-    updateRunProgress({
-      workspaceName,
-      runId: run.runId,
-      progress: {
-        phase: "extracting",
-        message: `Request too large, reducing batch size for ${batch[0]?.sourceFile || "current file"}`,
-        estimatedSecondsRemaining: buildEstimatedSeconds(totalSlices, processedSlicesBeforeBatch, batchCount, "extracting")
-      }
-    });
+    updateRunProgress({ workspaceName, runId: run.runId, progress: {
+      phase: "extracting",
+      message: `Request too large, reducing batch size for ${batch[0]?.sourceFile || "current file"}`,
+      estimatedSecondsRemaining: buildEstimatedSeconds(totalSlices, processedSlicesBeforeBatch, batchCount, "extracting")
+    }});
 
     if (batch.length > 1) {
       const midpoint = Math.ceil(batch.length / 2);
-      const left = await extractBatchAdaptive({
-        apiKey,
-        batch: batch.slice(0, midpoint),
-        promptText,
-        batchIndex,
-        batchCount,
-        run,
-        workspaceName,
-        processedSlicesBeforeBatch,
-        totalSlices
-      });
-      const right = await extractBatchAdaptive({
-        apiKey,
-        batch: batch.slice(midpoint),
-        promptText,
-        batchIndex,
-        batchCount,
-        run,
-        workspaceName,
-        processedSlicesBeforeBatch: processedSlicesBeforeBatch + batch.slice(0, midpoint).length,
-        totalSlices
-      });
+      const left = await extractBatchAdaptive({ apiKey, batch: batch.slice(0, midpoint), promptText, batchIndex, batchCount, run, workspaceName, processedSlicesBeforeBatch, totalSlices, timeHints, pageGroups });
+      const right = await extractBatchAdaptive({ apiKey, batch: batch.slice(midpoint), promptText, batchIndex, batchCount, run, workspaceName, processedSlicesBeforeBatch: processedSlicesBeforeBatch + batch.slice(0, midpoint).length, totalSlices, timeHints, pageGroups });
       return {
         numeric_rows: [...ensureArray(left.numeric_rows), ...ensureArray(right.numeric_rows)],
         text_rows: [...ensureArray(left.text_rows), ...ensureArray(right.text_rows)],
         summary: "",
-        report: { title: "", executive_summary: [], key_findings: [], recommendations: [], data_quality_notes: [] }
+        report: { title: "", executive_summary: [], top_insights: [], recommended_actions: [], data_quality_notes: [] }
       };
     }
 
-    return extractBatchOnce({
-      apiKey,
-      batch,
-      promptText,
-      detailMode: "low",
-      maxWidth: 850,
-      batchIndex,
-      batchCount,
-      run,
-      workspaceName,
-      processedSlicesBeforeBatch,
-      totalSlices
-    });
+    return extractBatchOnce({ apiKey, batch, promptText, detailMode: "low", maxWidth: 850, batchIndex, batchCount, run, workspaceName, processedSlicesBeforeBatch, totalSlices, timeHints, pageGroups });
   }
 }
 
-async function summarizeCombinedRows({ apiKey, run, numericRows, textRows, promptText, workspaceName }) {
-  updateRunProgress({
-    workspaceName,
-    runId: run.runId,
-    progress: {
-      phase: "summarizing",
-      message: `Building final report for ${run.clientName || run.workspaceName}`,
-      currentFileName: null,
-      currentFileIndex: Array.isArray(run.files) ? run.files.length : 0,
-      totalFiles: Array.isArray(run.files) ? run.files.length : 0,
-      currentSliceIndex: 0,
-      totalSlicesForFile: 0,
-      processedSlices: numericRows.length + textRows.length,
-      totalSlices: numericRows.length + textRows.length,
-      currentBatchIndex: 0,
-      totalBatches: 0,
-      estimatedSecondsRemaining: EST_SECONDS_FOR_SUMMARY
-    }
-  });
+async function summarizeCombinedRows({ apiKey, run, numericRows, textRows, promptText, workspaceName, timeHints, pageGroups }) {
+  updateRunProgress({ workspaceName, runId: run.runId, progress: {
+    phase: "ranking_insights",
+    message: `Ranking top business priorities for ${run.clientName || run.workspaceName}`,
+    currentFileName: null,
+    currentFileIndex: Array.isArray(run.files) ? run.files.length : 0,
+    totalFiles: Array.isArray(run.files) ? run.files.length : 0,
+    currentSliceIndex: 0,
+    totalSlicesForFile: 0,
+    processedSlices: numericRows.length + textRows.length,
+    totalSlices: numericRows.length + textRows.length,
+    currentBatchIndex: 0,
+    totalBatches: 0,
+    estimatedSecondsRemaining: EST_SECONDS_FOR_SUMMARY
+  }});
 
   const compactPayload = {
     runId: run.runId,
     workspaceName: run.workspaceName,
     clientName: run.clientName || "",
     screenshotCount: Array.isArray(run.files) ? run.files.length : 0,
+    page_groups: pageGroups,
+    time_hints: timeHints,
     numeric_rows: numericRows,
     text_rows: textRows
   };
 
   const summaryPrompt = [
-    "Create the final combined report from the extracted rows below.",
+    "Create the final report from the extracted rows below.",
     "The audience is CMI and category leads for the named client/platform.",
-    "Do not invent new metrics or new dimensions.",
-    "Do not mention categories unless category data is explicitly present in the extracted rows.",
-    "Where week labels and week_start_date values are available, describe trends across the latest visible weeks, especially the last 4 visible weeks when possible.",
-    "Key findings must be insight-oriented, not chart narration. Each finding should explain what is changing, why it matters, and what commercial implication follows.",
-    "If the extraction is thin or approximate, say so in summary and data_quality_notes.",
+    "Do not use a rigid fixed template. Instead, identify and rank the top 4 highest-priority business insights.",
+    "Use baseline screenshots as the reference point and evaluate how filtered cuts differ from baseline.",
+    "Rank insights by business harm, urgency, breadth, recent deterioration, competitive threat, and confidence.",
+    "Top insights must be truly insight-led, not chart narration.",
+    "Do not invent dimensions not present in the evidence.",
+    "If later weeks are visible in time_hints, use them correctly in recent-trend commentary.",
+    "Start effectively at executive summary. Avoid a long generic introductory paragraph.",
     "Return JSON only using the same top-level structure.",
-    "Keep numeric_rows and text_rows exactly aligned to the supplied rows.",
+    "Keep numeric_rows and text_rows aligned to supplied rows.",
     "",
     "Original extraction instruction:",
     promptText
   ].join("\n");
 
-  return callOpenAIJson({
-    apiKey,
-    messages: [
-      {
-        role: "system",
-        content: "You are a BI reporting assistant. Build an executive report only from already extracted rows. Produce insight-led conclusions for CMI and category leads. If a conclusion is not supported by rows, do not state it. When week labels exist, discuss recent trends across the latest visible weeks. Return JSON only."
-      },
-      {
-        role: "user",
-        content: `${summaryPrompt}\n\nExtracted rows JSON:\n${JSON.stringify(compactPayload)}`
-      }
-    ]
-  });
+  return callOpenAIJson({ apiKey, messages: [
+    { role: "system", content: "You are a BI reporting assistant. Build a concise executive report only from the extracted rows, time hints, and baseline-vs-cut grouping context. Output top 4 ranked insights with recommended actions. Return JSON only." },
+    { role: "user", content: `${summaryPrompt}\n\nExtracted rows JSON:\n${JSON.stringify(compactPayload)}` }
+  ]});
 }
 
 async function analyzeRunWithOpenAI({ workspaceName, runId, promptOverride }) {
@@ -546,28 +551,26 @@ async function analyzeRunWithOpenAI({ workspaceName, runId, promptOverride }) {
   if (!Array.isArray(run.files) || !run.files.length) throw new Error("No uploaded screenshots found for this run");
 
   updateRunStatus({ workspaceName, runId, status: "extracting", error: null });
-  updateRunProgress({
-    workspaceName,
-    runId,
-    progress: {
-      phase: "queued",
-      message: `Preparing ${run.files.length} screenshot(s) for slicing`,
-      currentFileName: null,
-      currentFileIndex: 0,
-      totalFiles: run.files.length,
-      currentSliceIndex: 0,
-      totalSlicesForFile: 0,
-      processedSlices: 0,
-      totalSlices: 0,
-      currentBatchIndex: 0,
-      totalBatches: 0,
-      estimatedSecondsRemaining: run.files.length * EST_SECONDS_PER_SLICE + EST_SECONDS_FOR_SUMMARY
-    }
-  });
+  updateRunProgress({ workspaceName, runId, progress: {
+    phase: "grouping",
+    message: `Grouping ${run.files.length} screenshot(s) into baseline and cuts`,
+    currentFileName: null,
+    currentFileIndex: 0,
+    totalFiles: run.files.length,
+    currentSliceIndex: 0,
+    totalSlicesForFile: 0,
+    processedSlices: 0,
+    totalSlices: 0,
+    currentBatchIndex: 0,
+    totalBatches: 0,
+    estimatedSecondsRemaining: run.files.length * EST_SECONDS_PER_SLICE + EST_SECONDS_FOR_SUMMARY
+  }});
 
+  const pageGroups = inferPageGroups(run.files);
   const sliceInputs = await buildSliceInputs(run, workspaceName);
   if (!sliceInputs.length) throw new Error("No chart slices could be created from the uploaded screenshots");
 
+  const timeHints = await extractAxisHints({ apiKey, run, slices: sliceInputs, workspaceName });
   const promptText = promptOverride || DEFAULT_ANALYSIS_PROMPT;
   const batches = chunkArray(sliceInputs, MAX_IMAGES_PER_BATCH);
   const totalSlices = sliceInputs.length;
@@ -577,77 +580,34 @@ async function analyzeRunWithOpenAI({ workspaceName, runId, promptOverride }) {
   const collectedTextRows = [];
 
   for (let i = 0; i < batches.length; i += 1) {
-    const partial = await extractBatchAdaptive({
-      apiKey,
-      batch: batches[i],
-      promptText,
-      batchIndex: i + 1,
-      batchCount: batches.length,
-      run,
-      workspaceName,
-      processedSlicesBeforeBatch: processedSlices,
-      totalSlices
-    });
-
+    const partial = await extractBatchAdaptive({ apiKey, batch: batches[i], promptText, batchIndex: i + 1, batchCount: batches.length, run, workspaceName, processedSlicesBeforeBatch: processedSlices, totalSlices, timeHints, pageGroups });
     processedSlices += batches[i].length;
-    updateRunProgress({
-      workspaceName,
-      runId,
-      progress: {
-        phase: "extracting",
-        message: `Finished batch ${i + 1} of ${batches.length}`,
-        currentFileName: batches[i][batches[i].length - 1]?.sourceFile || null,
-        currentFileIndex: batches[i][batches[i].length - 1]?.fileIndex || 0,
-        totalFiles: run.files.length,
-        currentSliceIndex: batches[i][batches[i].length - 1]?.sliceIndex || 0,
-        totalSlicesForFile: batches[i][batches[i].length - 1]?.totalSlicesForFile || 0,
-        processedSlices,
-        totalSlices,
-        currentBatchIndex: i + 1,
-        totalBatches: batches.length,
-        estimatedSecondsRemaining: buildEstimatedSeconds(totalSlices, processedSlices, batches.length, "extracting")
-      }
-    });
-
+    updateRunProgress({ workspaceName, runId, progress: {
+      phase: "extracting",
+      message: `Finished batch ${i + 1} of ${batches.length}`,
+      currentFileName: batches[i][batches[i].length - 1]?.sourceFile || null,
+      currentFileIndex: batches[i][batches[i].length - 1]?.fileIndex || 0,
+      totalFiles: run.files.length,
+      currentSliceIndex: batches[i][batches[i].length - 1]?.sliceIndex || 0,
+      totalSlicesForFile: batches[i][batches[i].length - 1]?.totalSlicesForFile || 0,
+      processedSlices,
+      totalSlices,
+      currentBatchIndex: i + 1,
+      totalBatches: batches.length,
+      estimatedSecondsRemaining: buildEstimatedSeconds(totalSlices, processedSlices, batches.length, "extracting")
+    }});
     collectedNumericRows.push(...ensureArray(partial.numeric_rows));
     collectedTextRows.push(...ensureArray(partial.text_rows));
   }
 
-  const dedupedNumericRows = dedupeRows(collectedNumericRows, (row) => [
-    ensureString(row.source_file),
-    ensureString(row.page),
-    ensureString(row.filter_type),
-    ensureString(row.filter_value),
-    ensureString(row.time_period),
-    ensureString(row.week_start_date),
-    ensureString(row.metric),
-    ensureString(row.value),
-    ensureString(row.unit),
-    ensureString(row.notes)
-  ].join("|"));
+  const dedupedTimeHints = dedupeRows(timeHints, (row) => [ensureString(row.source_file), ensureString(row.page), ensureString(row.filter_type), ensureString(row.filter_value), JSON.stringify(ensureArray(row.visible_weeks))].join("|"));
+  const dedupedNumericRows = dedupeRows(collectedNumericRows, (row) => [ensureString(row.source_file), ensureString(row.page), ensureString(row.comparison_mode), ensureString(row.filter_type), ensureString(row.filter_value), ensureString(row.time_period), ensureString(row.week_start_date), ensureString(row.metric), ensureString(row.value), ensureString(row.unit), ensureString(row.notes)].join("|"));
+  const dedupedTextRows = dedupeRows(collectedTextRows, (row) => [ensureString(row.source_file), ensureString(row.page), ensureString(row.comparison_mode), ensureString(row.filter_type), ensureString(row.filter_value), ensureString(row.time_period), ensureString(row.week_start_date), ensureString(row.label), ensureString(row.text), ensureString(row.notes)].join("|"));
 
-  const dedupedTextRows = dedupeRows(collectedTextRows, (row) => [
-    ensureString(row.source_file),
-    ensureString(row.page),
-    ensureString(row.filter_type),
-    ensureString(row.filter_value),
-    ensureString(row.time_period),
-    ensureString(row.week_start_date),
-    ensureString(row.label),
-    ensureString(row.text),
-    ensureString(row.notes)
-  ].join("|"));
-
-  const summarized = await summarizeCombinedRows({
-    apiKey,
-    run,
-    numericRows: dedupedNumericRows,
-    textRows: dedupedTextRows,
-    promptText,
-    workspaceName
-  });
+  const summarized = await summarizeCombinedRows({ apiKey, run, numericRows: dedupedNumericRows, textRows: dedupedTextRows, promptText, workspaceName, timeHints: dedupedTimeHints, pageGroups });
 
   const finalPayload = {
+    time_hints: dedupedTimeHints,
     numeric_rows: dedupedNumericRows,
     text_rows: dedupedTextRows,
     summary: ensureString(summarized.summary),
