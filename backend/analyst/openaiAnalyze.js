@@ -26,6 +26,10 @@ Core principles:
 - Key findings must be insight-led, not chart narration.
 - Do not hallucinate categories, cohorts, or dimensions that are not visible.
 - Preserve visible week labels and week start dates when present.
+- Read the chart title, subtitle, chart type, x-axis, y-axis title, units, and visible tick marks before interpreting the series.
+- When the y-axis and line/bar positions make a value reasonably legible, estimate conservative values for visible apps rather than leaving the chart as coverage-only.
+- If an exact number is not printed, estimate from the y-axis with explicit confidence and say so in notes.
+- Prefer a few grounded numeric estimates (latest point, peak, trough, obvious step-change, dominant share) over many weak guesses.
 
 Return only valid JSON using this structure:
 {
@@ -106,6 +110,20 @@ Return only valid JSON using this structure:
     "data_quality_notes": []
   }
 }
+
+Use text_rows to capture chart semantics when helpful, for example:
+- label=chart_title
+- label=chart_subtitle
+- label=chart_type
+- label=x_axis_title
+- label=y_axis_title
+- label=visual_trend
+
+Numeric row rules:
+- value may be an estimated number when the y-axis allows a conservative read.
+- unit should match the chart (e.g. sessions, users, seconds, %, index).
+- confidence must reflect certainty: high only for clearly readable values, medium for solid y-axis estimates, low for rough approximations.
+- notes should explicitly say estimated_from_y_axis when the number is estimated rather than printed.
 `.trim();
 
 function ensureArray(value) { return Array.isArray(value) ? value : []; }
@@ -539,6 +557,13 @@ async function extractBatchOnce({ apiKey, batch, promptText, detailMode, maxWidt
     "Return JSON only.",
     "Focus on rows visible in these images only.",
     "Use baseline screenshots as the anchor for interpreting filtered cuts under the same page or group key.",
+    "First read the chart title, subtitle, chart type, legend, x-axis labels, y-axis title, units, and tick marks.",
+    "Understand what the chart is trying to say before extracting rows.",
+    "When a line, bar, stacked bar, or area segment can be read against the y-axis, extract conservative estimated numeric_rows for visible apps.",
+    "Prioritize latest visible period, obvious peaks/troughs, major trend breaks, and dominant shares rather than forcing every point.",
+    "If a number is estimated from the y-axis, set confidence accordingly and include estimated_from_y_axis in notes.",
+    "For 100% stacked or share charts, percentages or share estimates are acceptable only when visually supportable.",
+    "Add text_rows for chart_title, chart_subtitle, chart_type, x_axis_title, y_axis_title, and major visual trend statements when visible.",
     `Extract visible entity names only when they are directly readable in legends, labels, tables, titles, or KPI text.`,
     `Only allow these app names: ${ALLOWED_APP_NAMES.join(", ")}.`,
     "Never infer sibling apps, brands, or products that are not visibly present.",
@@ -557,7 +582,7 @@ async function extractBatchOnce({ apiKey, batch, promptText, detailMode, maxWidt
   }
 
   return callOpenAIJson({ apiKey, messages: [
-    { role: "system", content: `You are a meticulous BI analyst. Extract only visually supported values from the provided chart slices. Preserve baseline-vs-cut context, week labels, and visible dimensions only. Build a visible_entities allowlist from names directly visible in the images. Only allow these app names: ${ALLOWED_APP_NAMES.join(", ")}. Never infer unseen apps, brands, or products. If a name is outside the allowed list, exclude it. Return JSON only.` },
+    { role: "system", content: `You are a meticulous BI analyst. Extract only visually supported values from the provided chart slices. Preserve baseline-vs-cut context, week labels, and visible dimensions only. Build a visible_entities allowlist from names directly visible in the images. Only allow these app names: ${ALLOWED_APP_NAMES.join(", ")}. Never infer unseen apps, brands, or products. If a name is outside the allowed list, exclude it. Read chart title, subtitle, chart type, x-axis, y-axis title, units, tick marks, and legend before extracting. When the y-axis supports it, produce conservative numeric estimates with explicit confidence and notes such as estimated_from_y_axis. Return JSON only.` },
     { role: "user", content: userContent }
   ]});
 }
@@ -626,6 +651,10 @@ async function summarizeCombinedRows({ apiKey, run, numericRows, textRows, visib
     "Rank insights by business harm, urgency, breadth, recent deterioration, competitive threat, and confidence.",
     "Top insights must be truly insight-led, not chart narration.",
     "Do not invent dimensions not present in the evidence.",
+    "If numeric_rows include conservative estimated values from the y-axis, use them with the stated confidence instead of ignoring them.",
+    "Read chart_title, chart_subtitle, chart_type, x_axis_title, y_axis_title, and visual_trend text_rows to understand what each chart means.",
+    "Do not reduce the report to coverage-only if charts visibly show trends, rank order, peaks, declines, duration, retention, switching, or distribution patterns.",
+    "Only say that evidence is limited to coverage when the extracted rows genuinely lack metric or directional content.",
     `Only discuss apps, brands, or products that appear in visible_entities for this run. The only valid app names are: ${ALLOWED_APP_NAMES.join(", ")}.`,
     "If an entity is absent from visible_entities, treat it as out of scope and do not mention it.",
     "Do not introduce any app name outside the approved list even if the model associates it with the category.",
@@ -640,7 +669,7 @@ async function summarizeCombinedRows({ apiKey, run, numericRows, textRows, visib
   ].join("\n");
 
   return callOpenAIJson({ apiKey, messages: [
-    { role: "system", content: `You are a BI reporting assistant. Build a concise executive report only from the extracted rows, time hints, visible_entities allowlist, and baseline-vs-cut grouping context. Only mention entities present in visible_entities for this run, and only from this approved app list: ${ALLOWED_APP_NAMES.join(", ")}. Use week_start_date as the calendar start date for visible weeks and never substitute a stale year. Output top 4 ranked insights with recommended actions. Return JSON only.` },
+    { role: "system", content: `You are a BI reporting assistant. Build a concise executive report only from the extracted rows, time hints, visible_entities allowlist, and baseline-vs-cut grouping context. Only mention entities present in visible_entities for this run, and only from this approved app list: ${ALLOWED_APP_NAMES.join(", ")}. Use week_start_date as the calendar start date for visible weeks and never substitute a stale year. Use conservative numeric estimates from the y-axis when they were extracted with confidence, and write actionable insights from the chart meaning rather than generic coverage statements. Return JSON only.` },
     { role: "user", content: `${summaryPrompt}\n\nExtracted rows JSON:\n${JSON.stringify(compactPayload)}` }
   ]});
 }
