@@ -4,6 +4,7 @@ const router = express.Router();
 const { getAnalysis, getLatestCompletedAnalysis, getRun } = require("./store");
 
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1";
+const ALLOWED_APP_NAMES = ["Ajio", "Amazon", "Amazon Now", "Bigbasket", "Blinkit", "Flipkart", "Flipkart Minutes", "Instamart", "Meesho", "Myntra", "Nykaa", "Shopsy", "Zepto"];
 
 function buildError(code, message) {
   return { ok: false, error: code, message };
@@ -182,6 +183,7 @@ router.post("/chat", async (req, res) => {
       finishedAt: resolvedRun.finishedAt,
       authoritative_visible_weeks: authoritativeWeekSupport,
       authoritative_supported_week_labels: authoritativeWeekSupport?.labels || [],
+      allowed_app_names: ALLOWED_APP_NAMES,
       visible_entities: visibleEntitySupport.visible_entities,
       visible_entity_names: visibleEntitySupport.visible_entity_names,
       visible_entity_name_set: visibleEntitySupport.visible_entity_name_set,
@@ -204,7 +206,7 @@ router.post("/chat", async (req, res) => {
         messages: [
           {
             role: "system",
-            content: "You answer only from the supplied extracted dashboard data for the selected run. Treat authoritative_visible_weeks and authoritative_supported_week_labels as the highest-priority evidence for time windows. If older or conflicting year-week labels fall outside authoritative_visible_weeks, treat them as stale extraction noise and ignore them. Never say a week is unavailable if it appears in authoritative_supported_week_labels. Only discuss apps, brands, or products whose normalized names appear in visible_entity_name_set. If the question asks about an entity outside visible_entity_name_set, say it is not visibly present in the uploaded screenshots for this run. Use top_insights as primary grounding when relevant. Use baseline vs filtered-cut comparisons when discussing what is hurting the business. Never hallucinate missing dimensions such as categories. If exact values are unavailable but the direction of risk is visible, say so clearly."
+            content: `You answer only from the supplied extracted dashboard data for the selected run. Treat authoritative_visible_weeks and authoritative_supported_week_labels as the highest-priority evidence for time windows. If older or conflicting year-week labels fall outside authoritative_visible_weeks, treat them as stale extraction noise and ignore them. Never say a week is unavailable if it appears in authoritative_supported_week_labels. Only discuss apps, brands, or products whose normalized names appear in visible_entity_name_set, and never mention an app outside this approved list: ${ALLOWED_APP_NAMES.join(", ")}. If the question asks about an entity outside visible_entity_name_set or outside the approved list, say it is not visibly present in the uploaded screenshots for this run. Use week_start_date as the calendar start date for visible weeks. Use top_insights as primary grounding when relevant. Use baseline vs filtered-cut comparisons when discussing what is hurting the business. Never hallucinate missing dimensions such as categories. If exact values are unavailable but the direction of risk is visible, say so clearly.`
           },
           { role: "user", content: `Grounding JSON:\n${JSON.stringify(grounding, null, 2)}\n\nQuestion: ${String(question).trim()}` }
         ]
