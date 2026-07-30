@@ -36,6 +36,67 @@ function safeFilePart(value) {
     .replace(/^_+|_+$/g, "") || "file";
 }
 
+function normalizeToken(value) {
+  return String(value || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ");
+}
+
+function parseStructuredFilename(fileName, fallbackPage, fallbackFilterType, fallbackFilterValue) {
+  const stem = String(path.parse(fileName || "").name || "").trim();
+  const cleanedStem = stem.replace(/\s+/g, " " ).trim();
+  const sequenceMatch = cleanedStem.match(/(?:^|[ _-])(\d{1,3})$/);
+  const sequence = sequenceMatch ? Number(sequenceMatch[1]) : null;
+  const stemWithoutSequence = sequenceMatch ? cleanedStem.slice(0, sequenceMatch.index).trim().replace(/[ _-]+$/, "") : cleanedStem;
+  const rawParts = stemWithoutSequence.includes("__")
+    ? stemWithoutSequence.split("__")
+    : stemWithoutSequence.split(/_(?=[A-Za-z])/g);
+  const parts = rawParts.map((part) => String(part || "").trim()).filter(Boolean);
+  const section = parts[0] || fallbackPage || "";
+  const filterPart = parts.slice(1).find(Boolean) || "";
+  const filterText = normalizeToken(filterPart);
+
+  let inferredFilterType = fallbackFilterType || "";
+  let inferredFilterValue = fallbackFilterValue || "";
+
+  if (/^all zones?$/.test(filterText)) {
+    inferredFilterType = inferredFilterType || "Zone";
+    inferredFilterValue = inferredFilterValue || "All";
+  } else {
+    const patterns = [
+      [/^zone (.+)$/i, "Zone"],
+      [/^nccs (.+)$/i, "NCCS"],
+      [/^tier (.+)$/i, "Tier"],
+      [/^gender (.+)$/i, "Gender"],
+      [/^age band (.+)$/i, "Age Band"]
+    ];
+    for (const [pattern, label] of patterns) {
+      const match = filterText.match(pattern);
+      if (!match) continue;
+      inferredFilterType = inferredFilterType || label;
+      inferredFilterValue = inferredFilterValue || String(match[1] || "").trim();
+      break;
+    }
+  }
+
+  const normalizedPage = section || fallbackPage || "";
+  const normalizedFilterType = inferredFilterType || "";
+  const normalizedFilterValue = inferredFilterValue || "";
+  const groupKey = slugify([normalizedPage, normalizedFilterType, normalizedFilterValue].filter(Boolean).join("__") || normalizedPage || stemWithoutSequence || fileName || "group");
+
+  return {
+    normalizedPage,
+    normalizedFilterType,
+    normalizedFilterValue,
+    groupKey,
+    groupSequence: Number.isFinite(sequence) ? sequence : null,
+    parsedFromFileName: Boolean(parts.length || sequenceMatch),
+    fileStem: stemWithoutSequence
+  };
+}
+
 function getWorkspaceParts(workspaceName) {
   const workspaceKey = slugify(workspaceName || "default-workspace");
   const workspaceDir = path.join(DATA_DIR, "analyst", workspaceKey);
@@ -145,6 +206,7 @@ function saveBase64Image({ workspaceName, runId, fileName, dataUrl }) {
   };
 }
 
+
 function addFileToRun({ workspaceName, runId, fileName, page, comparisonMode, filterType, filterValue, note, dataUrl }) {
   const runsFile = getRunsFile(workspaceName);
   const runs = readJson(runsFile, []);
@@ -153,27 +215,42 @@ function addFileToRun({ workspaceName, runId, fileName, page, comparisonMode, fi
 
   const saved = saveBase64Image({ workspaceName, runId, fileName, dataUrl });
   const normalizedComparisonMode = comparisonMode === "baseline" ? "baseline" : "cut";
+  const parsedName = parseStructuredFilename(fileName, page, filterType, filterValue);
+  const resolvedPage = page || parsedName.normalizedPage || "";
+  const resolvedFilterType = filterType || parsedName.normalizedFilterType || (normalizedComparisonMode === "baseline" ? "Baseline" : "");
+  const resolvedFilterValue = filterValue || parsedName.normalizedFilterValue || (normalizedComparisonMode === "baseline" ? "Overall" : "");
   const fileRecord = {
     fileId: `file_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     fileName: fileName || saved.storedFileName,
     storedFileName: saved.storedFileName,
     imagePath: saved.imagePath,
     publicPath: saved.publicPath,
-    page: page || "",
+    page: resolvedPage,
     comparisonMode: normalizedComparisonMode,
-    filterType: filterType || (normalizedComparisonMode === "baseline" ? "Baseline" : ""),
-    filterValue: filterValue || (normalizedComparisonMode === "baseline" ? "Overall" : ""),
+    filterType: resolvedFilterType,
+    filterValue: resolvedFilterValue,
     note: note || "",
+    groupKey: parsedName.groupKey,
+    groupSequence: parsedName.groupSequence,
+    parsedFromFileName: parsedName.parsedFromFileName,
+    fileStem: parsedName.fileStem,
     uploadedAt: new Date().toISOString()
   };
 
   runs[idx].files.push(fileRecord);
+  runs[idx].files.sort((a, b) => {
+    const left = Number.isFinite(Number(a.groupSequence)) ? Number(a.groupSequence) : Number.MAX_SAFE_INTEGER;
+    const right = Number.isFinite(Number(b.groupSequence)) ? Number(b.groupSequence) : Number.MAX_SAFE_INTEGER;
+    if (a.groupKey === b.groupKey && left !== right) return left - right;
+    if (a.groupKey !== b.groupKey) return String(a.groupKey || "").localeCompare(String(b.groupKey || ""));
+    return String(a.fileName || "").localeCompare(String(b.fileName || ""));
+  });
   runs[idx].fileCount = runs[idx].files.length;
   runs[idx].status = "collecting";
   runs[idx].progress = {
     ...(runs[idx].progress || defaultProgress()),
     phase: "collecting",
-    message: `${runs[idx].fileCount} screenshot(s) added`,
+    message: `${runs[idx].fileCount} screenshot(s) added across ${new Set(runs[idx].files.map((file) => file.groupKey || file.page || file.fileName)).size} group(s)`,
     totalFiles: runs[idx].fileCount,
     updatedAt: new Date().toISOString()
   };
@@ -205,24 +282,8 @@ function updateRunStatus({ workspaceName, runId, status, error = null }) {
   const idx = runs.findIndex((run) => run.runId === runId);
   if (idx === -1) throw new Error("Run not found");
 
-  const statusMessages = {
-    started: "Run created",
-    collecting: "Collecting screenshots",
-    upload_complete: "Screenshots ready for analysis",
-    queued: "Queued for analysis",
-    extracting: "Starting extraction",
-    completed: "Analysis completed",
-    failed: error || "Analysis failed"
-  };
-
   runs[idx].status = status;
   runs[idx].error = error;
-  runs[idx].progress = {
-    ...(runs[idx].progress || defaultProgress()),
-    phase: status === "failed" ? "failed" : (runs[idx].progress?.phase || status),
-    message: error || runs[idx].progress?.message || statusMessages[status] || `Status: ${status}`,
-    updatedAt: new Date().toISOString()
-  };
   if (status === "failed") {
     runs[idx].progress = {
       ...(runs[idx].progress || defaultProgress()),
