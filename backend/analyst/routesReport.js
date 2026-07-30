@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 
 const { getAnalysis, getLatestCompletedAnalysis, getRun, listRuns } = require("./store");
+const ALLOWED_APP_NAMES = ["Ajio", "Amazon", "Amazon Now", "Bigbasket", "Blinkit", "Flipkart", "Flipkart Minutes", "Instamart", "Meesho", "Myntra", "Nykaa", "Shopsy", "Zepto"];
 
 function hasUsableData(analysis) {
   if (!analysis) return false;
@@ -151,6 +152,7 @@ function buildReportPayload(run, analysis) {
     hasUsableData: hasUsableData(analysis),
     summary: analysis.summary || "",
     authoritative_visible_weeks: authoritativeWeekSupport,
+    allowed_app_names: ALLOWED_APP_NAMES,
     visible_entities: visibleEntitySupport.visible_entities,
     visible_entity_names: visibleEntitySupport.visible_entity_names,
     visibleEntityCount: visibleEntitySupport.visible_entity_names.length,
