@@ -12,7 +12,6 @@ const DEFAULT_VISION_MAX_WIDTH = Math.max(700, Number(process.env.ANALYST_VISION
 const DEFAULT_VISION_DETAIL = process.env.ANALYST_VISION_DETAIL || "low";
 const EST_SECONDS_PER_SLICE = Math.max(3, Number(process.env.ANALYST_EST_SECONDS_PER_SLICE || 8));
 const EST_SECONDS_FOR_SUMMARY = Math.max(4, Number(process.env.ANALYST_EST_SECONDS_FOR_SUMMARY || 10));
-const OPENAI_TIMEOUT_MS = Math.max(30000, Number(process.env.ANALYST_OPENAI_TIMEOUT_MS || 180000));
 
 const DEFAULT_ANALYSIS_PROMPT = `
 You are analyzing tagged dashboard screenshots from a business intelligence workflow.
@@ -75,6 +74,18 @@ Return only valid JSON using this structure:
       "notes": ""
     }
   ],
+  "visible_entities": [
+    {
+      "name": "",
+      "entity_type": "",
+      "source_file": "",
+      "page": "",
+      "filter_type": "",
+      "filter_value": "",
+      "confidence": "",
+      "notes": ""
+    }
+  ],
   "summary": "",
   "report": {
     "title": "",
@@ -99,6 +110,21 @@ Return only valid JSON using this structure:
 function ensureArray(value) { return Array.isArray(value) ? value : []; }
 function ensureString(value) { return typeof value === "string" ? value : ""; }
 function ensureNumber(value) { return Number.isFinite(Number(value)) ? Number(value) : 0; }
+function normalizeEntityName(value) { return ensureString(value).toLowerCase().trim().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " "); }
+
+function normalizeVisibleEntities(items) {
+  return ensureArray(items).map((item) => ({
+    name: ensureString(item.name),
+    normalized_name: normalizeEntityName(item.name),
+    entity_type: ensureString(item.entity_type),
+    source_file: ensureString(item.source_file),
+    page: ensureString(item.page),
+    filter_type: ensureString(item.filter_type),
+    filter_value: ensureString(item.filter_value),
+    confidence: ensureString(item.confidence),
+    notes: ensureString(item.notes)
+  })).filter((item) => item.name && item.normalized_name);
+}
 
 function normalizeReport(report) {
   const safe = report && typeof report === "object" ? report : {};
@@ -144,6 +170,7 @@ function normalizeAnalysis(raw, run) {
     clientName: ensureString(run.clientName),
     createdAt: new Date().toISOString(),
     time_hints: normalizeTimeHints(safe.time_hints),
+    visible_entities: normalizeVisibleEntities(safe.visible_entities),
     numeric_rows: normalizeRows(safe.numeric_rows, (row) => ({
       source_file: ensureString(row.source_file),
       page: ensureString(row.page),
@@ -279,16 +306,40 @@ function buildEstimatedSeconds(totalSlices, processedSlices, totalBatches, curre
   return base + EST_SECONDS_FOR_SUMMARY;
 }
 
+
 function inferPageGroups(files) {
   const map = new Map();
   for (const file of files) {
-    const key = file.page || "Unknown";
-    if (!map.has(key)) map.set(key, { page: key, baseline: null, cuts: [] });
+    const key = file.groupKey || [file.page, file.filterType, file.filterValue].filter(Boolean).join("__") || file.fileName || "Unknown";
+    if (!map.has(key)) {
+      map.set(key, {
+        group_key: key,
+        page: file.page || "Unknown",
+        filter_type: file.filterType || "",
+        filter_value: file.filterValue || "",
+        baseline: null,
+        cuts: [],
+        ordered_files: []
+      });
+    }
     const group = map.get(key);
+    group.ordered_files.push({
+      file_name: file.fileName,
+      comparison_mode: file.comparisonMode,
+      group_sequence: Number.isFinite(Number(file.groupSequence)) ? Number(file.groupSequence) : null
+    });
     if (file.comparisonMode === "baseline" && !group.baseline) group.baseline = file;
     else group.cuts.push(file);
   }
-  return Array.from(map.values());
+  return Array.from(map.values()).map((group) => ({
+    ...group,
+    ordered_files: group.ordered_files.sort((a, b) => {
+      const left = Number.isFinite(Number(a.group_sequence)) ? Number(a.group_sequence) : Number.MAX_SAFE_INTEGER;
+      const right = Number.isFinite(Number(b.group_sequence)) ? Number(b.group_sequence) : Number.MAX_SAFE_INTEGER;
+      if (left !== right) return left - right;
+      return String(a.file_name || "").localeCompare(String(b.file_name || ""));
+    })
+  }));
 }
 
 async function buildSliceInputs(run, workspaceName) {
@@ -324,6 +375,8 @@ async function buildSliceInputs(run, workspaceName) {
         filterType: file.filterType,
         filterValue: file.filterValue,
         note: file.note || "",
+        groupKey: file.groupKey || [file.page, file.filterType, file.filterValue].filter(Boolean).join("__"),
+        groupSequence: file.groupSequence,
         sliceLabel: slice.sliceLabel,
         sliceIndex: slice.sliceIndex,
         slicePath: slice.slicePath,
@@ -352,29 +405,17 @@ async function buildSliceInputs(run, workspaceName) {
   return limitSlicesPerFile(slices);
 }
 
-async function callOpenAIJson({ apiKey, messages, timeoutMs = OPENAI_TIMEOUT_MS }) {
-  const controller = new AbortController();
-  const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({ model: OPENAI_MODEL, temperature: 0.1, response_format: { type: "json_object" }, messages }),
-      signal: controller.signal
-    });
-    const raw = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(raw?.error?.message || "OpenAI request failed");
-    const content = raw?.choices?.[0]?.message?.content;
-    if (!content) throw new Error("OpenAI returned an empty response");
-    return parseJsonSafe(content);
-  } catch (error) {
-    if (error?.name === "AbortError") {
-      throw new Error(`OpenAI request timed out after ${Math.round(timeoutMs / 1000)}s`);
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeoutHandle);
-  }
+async function callOpenAIJson({ apiKey, messages }) {
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({ model: OPENAI_MODEL, temperature: 0.1, response_format: { type: "json_object" }, messages })
+  });
+  const raw = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(raw?.error?.message || "OpenAI request failed");
+  const content = raw?.choices?.[0]?.message?.content;
+  if (!content) throw new Error("OpenAI returned an empty response");
+  return parseJsonSafe(content);
 }
 
 function isTooLargeError(error) {
@@ -409,24 +450,9 @@ async function extractAxisHints({ apiKey, run, slices, workspaceName }) {
   ].join("\n") }];
 
   for (const slice of axisSlices) {
-    content.push({ type: "text", text: `source_file=${slice.sourceFile} page=${slice.page} comparison_mode=${slice.comparisonMode} filter_type=${slice.filterType} filter_value=${slice.filterValue} slice_label=${slice.sliceLabel}` });
+    content.push({ type: "text", text: `source_file=${slice.sourceFile} page=${slice.page} comparison_mode=${slice.comparisonMode} filter_type=${slice.filterType} filter_value=${slice.filterValue} group_key=${slice.groupKey || ""} slice_label=${slice.sliceLabel}` });
     content.push({ type: "image_url", image_url: { url: await imagePathToDataUrl(slice.slicePath, 1200, "low"), detail: "low" } });
   }
-
-  updateRunProgress({ workspaceName, runId: run.runId, progress: {
-    phase: "axis_read",
-    message: `Sending axis-read request to AI for ${axisSlices.length} slice(s)`,
-    currentFileName: axisSlices[0]?.sourceFile || null,
-    currentFileIndex: axisSlices[0]?.fileIndex || 0,
-    totalFiles: run.files.length,
-    currentSliceIndex: axisSlices[0]?.sliceIndex || 0,
-    totalSlicesForFile: axisSlices[0]?.totalSlicesForFile || 0,
-    processedSlices: 0,
-    totalSlices: axisSlices.length,
-    currentBatchIndex: 1,
-    totalBatches: 1,
-    estimatedSecondsRemaining: Math.max(6, axisSlices.length * 4)
-  }});
 
   const parsed = await callOpenAIJson({ apiKey, messages: [
     { role: "system", content: "You read time-axis labels from dashboard chart screenshots. Extract only visible weekly labels and week start dates. Return JSON only." },
@@ -461,6 +487,8 @@ async function extractBatchOnce({ apiKey, batch, promptText, detailMode, maxWidt
     `filter_type=${slice.filterType}`,
     `filter_value=${slice.filterValue}`,
     `slice_label=${slice.sliceLabel}`,
+    `group_key=${slice.groupKey || ""}`,
+    `group_sequence=${slice.groupSequence ?? ""}`,
     `slice_index=${slice.sliceIndex}`,
     `slices_for_file=${slice.totalSlicesForFile}`,
     `note=${slice.note || ""}`
@@ -473,7 +501,9 @@ async function extractBatchOnce({ apiKey, batch, promptText, detailMode, maxWidt
     `This is extraction batch ${batchIndex} of ${batchCount}.`,
     "Return JSON only.",
     "Focus on rows visible in these images only.",
-    "Use baseline screenshots as the anchor for interpreting filtered cuts under the same page.",
+    "Use baseline screenshots as the anchor for interpreting filtered cuts under the same page or group key.",
+    "Extract visible entity names only when they are directly readable in legends, labels, tables, titles, or KPI text.",
+    "Never infer sibling apps, brands, or products that are not visibly present.",
     "Do not mention dimensions that are not visibly present.",
     "Page grouping context:",
     JSON.stringify(pageGroups, null, 2),
@@ -483,42 +513,12 @@ async function extractBatchOnce({ apiKey, batch, promptText, detailMode, maxWidt
     metadataLines
   ].join("\n") }];
 
-  for (let index = 0; index < batch.length; index += 1) {
-    const slice = batch[index];
-    updateRunProgress({ workspaceName, runId: run.runId, progress: {
-      phase: "extracting",
-      message: `Preparing slice ${index + 1} of ${batch.length} for batch ${batchIndex} of ${batchCount}`,
-      currentFileName: slice.sourceFile,
-      currentFileIndex: slice.fileIndex,
-      totalFiles: slice.totalFiles,
-      currentSliceIndex: slice.sliceIndex,
-      totalSlicesForFile: slice.totalSlicesForFile,
-      processedSlices: processedSlicesBeforeBatch + index,
-      totalSlices,
-      currentBatchIndex: batchIndex,
-      totalBatches: batchCount,
-      estimatedSecondsRemaining: buildEstimatedSeconds(totalSlices, processedSlicesBeforeBatch, batchCount, "extracting")
-    }});
+  for (const slice of batch) {
     userContent.push({ type: "image_url", image_url: { url: await imagePathToDataUrl(slice.slicePath, maxWidth, detailMode), detail: detailMode } });
   }
 
-  updateRunProgress({ workspaceName, runId: run.runId, progress: {
-    phase: "extracting",
-    message: `Waiting for AI response on batch ${batchIndex} of ${batchCount}`,
-    currentFileName: first.sourceFile,
-    currentFileIndex: first.fileIndex,
-    totalFiles: first.totalFiles,
-    currentSliceIndex: first.sliceIndex,
-    totalSlicesForFile: first.totalSlicesForFile,
-    processedSlices: processedSlicesBeforeBatch,
-    totalSlices,
-    currentBatchIndex: batchIndex,
-    totalBatches: batchCount,
-    estimatedSecondsRemaining: buildEstimatedSeconds(totalSlices, processedSlicesBeforeBatch, batchCount, "extracting")
-  }});
-
   return callOpenAIJson({ apiKey, messages: [
-    { role: "system", content: "You are a meticulous BI analyst. Extract only visually supported values from the provided chart slices. Preserve baseline-vs-cut context, week labels, and visible dimensions only. Return JSON only." },
+    { role: "system", content: "You are a meticulous BI analyst. Extract only visually supported values from the provided chart slices. Preserve baseline-vs-cut context, week labels, and visible dimensions only. Build a visible_entities allowlist from names directly visible in the images. Never infer unseen apps, brands, or products. Return JSON only." },
     { role: "user", content: userContent }
   ]});
 }
@@ -541,6 +541,7 @@ async function extractBatchAdaptive({ apiKey, batch, promptText, batchIndex, bat
       return {
         numeric_rows: [...ensureArray(left.numeric_rows), ...ensureArray(right.numeric_rows)],
         text_rows: [...ensureArray(left.text_rows), ...ensureArray(right.text_rows)],
+        visible_entities: [...ensureArray(left.visible_entities), ...ensureArray(right.visible_entities)],
         summary: "",
         report: { title: "", executive_summary: [], top_insights: [], recommended_actions: [], data_quality_notes: [] }
       };
@@ -550,7 +551,7 @@ async function extractBatchAdaptive({ apiKey, batch, promptText, batchIndex, bat
   }
 }
 
-async function summarizeCombinedRows({ apiKey, run, numericRows, textRows, promptText, workspaceName, timeHints, pageGroups }) {
+async function summarizeCombinedRows({ apiKey, run, numericRows, textRows, visibleEntities, promptText, workspaceName, timeHints, pageGroups }) {
   updateRunProgress({ workspaceName, runId: run.runId, progress: {
     phase: "ranking_insights",
     message: `Ranking top business priorities for ${run.clientName || run.workspaceName}`,
@@ -573,6 +574,7 @@ async function summarizeCombinedRows({ apiKey, run, numericRows, textRows, promp
     screenshotCount: Array.isArray(run.files) ? run.files.length : 0,
     page_groups: pageGroups,
     time_hints: timeHints,
+    visible_entities: visibleEntities,
     numeric_rows: numericRows,
     text_rows: textRows
   };
@@ -585,6 +587,8 @@ async function summarizeCombinedRows({ apiKey, run, numericRows, textRows, promp
     "Rank insights by business harm, urgency, breadth, recent deterioration, competitive threat, and confidence.",
     "Top insights must be truly insight-led, not chart narration.",
     "Do not invent dimensions not present in the evidence.",
+    "Only discuss apps, brands, or products that appear in visible_entities for this run.",
+    "If an entity is absent from visible_entities, treat it as out of scope and do not mention it.",
     "If later weeks are visible in time_hints, use them correctly in recent-trend commentary.",
     "Start effectively at executive summary. Avoid a long generic introductory paragraph.",
     "Return JSON only using the same top-level structure.",
@@ -595,7 +599,7 @@ async function summarizeCombinedRows({ apiKey, run, numericRows, textRows, promp
   ].join("\n");
 
   return callOpenAIJson({ apiKey, messages: [
-    { role: "system", content: "You are a BI reporting assistant. Build a concise executive report only from the extracted rows, time hints, and baseline-vs-cut grouping context. Output top 4 ranked insights with recommended actions. Return JSON only." },
+    { role: "system", content: "You are a BI reporting assistant. Build a concise executive report only from the extracted rows, time hints, visible_entities allowlist, and baseline-vs-cut grouping context. Only mention entities present in visible_entities for this run. Output top 4 ranked insights with recommended actions. Return JSON only." },
     { role: "user", content: `${summaryPrompt}\n\nExtracted rows JSON:\n${JSON.stringify(compactPayload)}` }
   ]});
 }
@@ -636,6 +640,7 @@ async function analyzeRunWithOpenAI({ workspaceName, runId, promptOverride }) {
 
   const collectedNumericRows = [];
   const collectedTextRows = [];
+  const collectedVisibleEntities = [];
 
   for (let i = 0; i < batches.length; i += 1) {
     const partial = await extractBatchAdaptive({ apiKey, batch: batches[i], promptText, batchIndex: i + 1, batchCount: batches.length, run, workspaceName, processedSlicesBeforeBatch: processedSlices, totalSlices, timeHints, pageGroups });
@@ -656,16 +661,19 @@ async function analyzeRunWithOpenAI({ workspaceName, runId, promptOverride }) {
     }});
     collectedNumericRows.push(...ensureArray(partial.numeric_rows));
     collectedTextRows.push(...ensureArray(partial.text_rows));
+    collectedVisibleEntities.push(...ensureArray(partial.visible_entities));
   }
 
   const dedupedTimeHints = dedupeRows(timeHints, (row) => [ensureString(row.source_file), ensureString(row.page), ensureString(row.filter_type), ensureString(row.filter_value), JSON.stringify(ensureArray(row.visible_weeks))].join("|"));
   const dedupedNumericRows = dedupeRows(collectedNumericRows, (row) => [ensureString(row.source_file), ensureString(row.page), ensureString(row.comparison_mode), ensureString(row.filter_type), ensureString(row.filter_value), ensureString(row.time_period), ensureString(row.week_start_date), ensureString(row.metric), ensureString(row.value), ensureString(row.unit), ensureString(row.notes)].join("|"));
   const dedupedTextRows = dedupeRows(collectedTextRows, (row) => [ensureString(row.source_file), ensureString(row.page), ensureString(row.comparison_mode), ensureString(row.filter_type), ensureString(row.filter_value), ensureString(row.time_period), ensureString(row.week_start_date), ensureString(row.label), ensureString(row.text), ensureString(row.notes)].join("|"));
+  const dedupedVisibleEntities = dedupeRows(normalizeVisibleEntities(collectedVisibleEntities), (row) => [ensureString(row.normalized_name), ensureString(row.page), ensureString(row.filter_type), ensureString(row.filter_value), ensureString(row.source_file)].join("|"));
 
-  const summarized = await summarizeCombinedRows({ apiKey, run, numericRows: dedupedNumericRows, textRows: dedupedTextRows, promptText, workspaceName, timeHints: dedupedTimeHints, pageGroups });
+  const summarized = await summarizeCombinedRows({ apiKey, run, numericRows: dedupedNumericRows, textRows: dedupedTextRows, visibleEntities: dedupedVisibleEntities, promptText, workspaceName, timeHints: dedupedTimeHints, pageGroups });
 
   const finalPayload = {
     time_hints: dedupedTimeHints,
+    visible_entities: dedupedVisibleEntities,
     numeric_rows: dedupedNumericRows,
     text_rows: dedupedTextRows,
     summary: ensureString(summarized.summary),
