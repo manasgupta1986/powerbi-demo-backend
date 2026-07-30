@@ -106,8 +106,29 @@ function buildSafeTitle(originalTitle, clientName, support) {
   return `${base} (${support.range_label})`;
 }
 
+function normalizeEntityName(value) {
+  return String(value || "").toLowerCase().trim().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ");
+}
+
+function deriveVisibleEntitySupport(analysis) {
+  const entities = Array.isArray(analysis?.visible_entities) ? analysis.visible_entities : [];
+  const unique = new Map();
+  for (const entity of entities) {
+    const key = normalizeEntityName(entity?.name);
+    if (!key) continue;
+    if (!unique.has(key)) unique.set(key, String(entity.name || "").trim());
+  }
+  const visibleEntityNames = Array.from(unique.values());
+  return {
+    visible_entities: entities,
+    visible_entity_names: visibleEntityNames,
+    visible_entity_name_set: visibleEntityNames.map((item) => normalizeEntityName(item))
+  };
+}
+
 function buildReportPayload(run, analysis) {
   const authoritativeWeekSupport = deriveAuthoritativeWeekSupport(analysis);
+  const visibleEntitySupport = deriveVisibleEntitySupport(analysis);
   const filteredTimeHints = filterTimeHintsToSupport(analysis.time_hints || [], authoritativeWeekSupport);
   const filteredNumericRows = filterRowsToSupport(analysis.numeric_rows || [], authoritativeWeekSupport, "time_period");
   const filteredTextRows = filterRowsToSupport(analysis.text_rows || [], authoritativeWeekSupport, "time_period");
@@ -130,6 +151,9 @@ function buildReportPayload(run, analysis) {
     hasUsableData: hasUsableData(analysis),
     summary: analysis.summary || "",
     authoritative_visible_weeks: authoritativeWeekSupport,
+    visible_entities: visibleEntitySupport.visible_entities,
+    visible_entity_names: visibleEntitySupport.visible_entity_names,
+    visibleEntityCount: visibleEntitySupport.visible_entity_names.length,
     report: {
       ...safeReport,
       title: buildSafeTitle(safeReport.title, run.clientName || run.workspaceName, authoritativeWeekSupport)
@@ -238,7 +262,7 @@ router.get("/report/html", (req, res) => {
 </head>
 <body>
   <h1>${payload.report.title || `${payload.clientName || "Client"} Executive Summary`}</h1>
-  <div class="meta">Run created ${payload.createdAt} · Numeric rows ${payload.numericRowCount} · Text rows ${payload.textRowCount} · Time hints ${payload.timeHintCount}${payload.authoritative_visible_weeks?.range_label ? ` · Visible weeks ${payload.authoritative_visible_weeks.range_label}` : ""}</div>
+  <div class="meta">Run created ${payload.createdAt} · Numeric rows ${payload.numericRowCount} · Text rows ${payload.textRowCount} · Time hints ${payload.timeHintCount}${payload.authoritative_visible_weeks?.range_label ? ` · Visible weeks ${payload.authoritative_visible_weeks.range_label}` : ""}${payload.visibleEntityCount ? ` · Visible entities ${payload.visibleEntityCount}` : ""}</div>
   ${listSection("Executive Summary", payload.report.executive_summary)}
   ${insightCards(payload.report.top_insights)}
   ${listSection("Recommended Actions", payload.report.recommended_actions)}
