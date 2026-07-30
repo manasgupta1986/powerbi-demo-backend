@@ -12,6 +12,7 @@ const DEFAULT_VISION_MAX_WIDTH = Math.max(700, Number(process.env.ANALYST_VISION
 const DEFAULT_VISION_DETAIL = process.env.ANALYST_VISION_DETAIL || "low";
 const EST_SECONDS_PER_SLICE = Math.max(3, Number(process.env.ANALYST_EST_SECONDS_PER_SLICE || 8));
 const EST_SECONDS_FOR_SUMMARY = Math.max(4, Number(process.env.ANALYST_EST_SECONDS_FOR_SUMMARY || 10));
+const ALLOWED_APP_NAMES = ["Ajio", "Amazon", "Amazon Now", "Bigbasket", "Blinkit", "Flipkart", "Flipkart Minutes", "Instamart", "Meesho", "Myntra", "Nykaa", "Shopsy", "Zepto"];
 
 const DEFAULT_ANALYSIS_PROMPT = `
 You are analyzing tagged dashboard screenshots from a business intelligence workflow.
@@ -112,18 +113,53 @@ function ensureString(value) { return typeof value === "string" ? value : ""; }
 function ensureNumber(value) { return Number.isFinite(Number(value)) ? Number(value) : 0; }
 function normalizeEntityName(value) { return ensureString(value).toLowerCase().trim().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " "); }
 
+const ALLOWED_APP_NAME_MAP = new Map(ALLOWED_APP_NAMES.map((name) => [normalizeEntityName(name), name]));
+
+function canonicalAllowedAppName(value) {
+  const normalized = normalizeEntityName(value);
+  return ALLOWED_APP_NAME_MAP.get(normalized) || "";
+}
+
 function normalizeVisibleEntities(items) {
-  return ensureArray(items).map((item) => ({
-    name: ensureString(item.name),
-    normalized_name: normalizeEntityName(item.name),
-    entity_type: ensureString(item.entity_type),
-    source_file: ensureString(item.source_file),
-    page: ensureString(item.page),
-    filter_type: ensureString(item.filter_type),
-    filter_value: ensureString(item.filter_value),
-    confidence: ensureString(item.confidence),
-    notes: ensureString(item.notes)
-  })).filter((item) => item.name && item.normalized_name);
+  return ensureArray(items).map((item) => {
+    const canonicalName = canonicalAllowedAppName(item.name);
+    return {
+      name: canonicalName || ensureString(item.name),
+      normalized_name: normalizeEntityName(canonicalName || item.name),
+      entity_type: ensureString(item.entity_type),
+      source_file: ensureString(item.source_file),
+      page: ensureString(item.page),
+      filter_type: ensureString(item.filter_type),
+      filter_value: ensureString(item.filter_value),
+      confidence: ensureString(item.confidence),
+      notes: ensureString(item.notes)
+    };
+  }).filter((item) => item.name && item.normalized_name && ALLOWED_APP_NAME_MAP.has(item.normalized_name));
+}
+
+function isoWeekStartDateParts(year, week) {
+  if (!Number.isFinite(year) || !Number.isFinite(week) || week < 1 || week > 53) return null;
+  const jan4 = new Date(Date.UTC(year, 0, 4));
+  const jan4Day = jan4.getUTCDay() || 7;
+  const mondayWeek1 = new Date(jan4);
+  mondayWeek1.setUTCDate(jan4.getUTCDate() - (jan4Day - 1));
+  const target = new Date(mondayWeek1);
+  target.setUTCDate(mondayWeek1.getUTCDate() + ((week - 1) * 7));
+  return {
+    year: target.getUTCFullYear(),
+    month: target.getUTCMonth() + 1,
+    day: target.getUTCDate()
+  };
+}
+
+function deriveWeekStartDateFromLabel(label) {
+  const match = ensureString(label).match(/\b(20\d{2})-W(\d{1,2})\b/);
+  if (!match) return "";
+  const year = Number(match[1]);
+  const week = Number(match[2]);
+  const parts = isoWeekStartDateParts(year, week);
+  if (!parts) return "";
+  return `${String(parts.day).padStart(2, "0")}/${String(parts.month).padStart(2, "0")}/${parts.year}`;
 }
 
 function normalizeReport(report) {
@@ -153,7 +189,7 @@ function normalizeTimeHints(hints) {
     filter_value: ensureString(hint.filter_value),
     visible_weeks: ensureArray(hint.visible_weeks).map((item) => ({
       week_label: ensureString(item.week_label),
-      week_start_date: ensureString(item.week_start_date),
+      week_start_date: ensureString(item.week_start_date) || deriveWeekStartDateFromLabel(item.week_label),
       confidence: ensureString(item.confidence),
       notes: ensureString(item.notes)
     }))
@@ -178,7 +214,7 @@ function normalizeAnalysis(raw, run) {
       filter_type: ensureString(row.filter_type),
       filter_value: ensureString(row.filter_value),
       time_period: ensureString(row.time_period),
-      week_start_date: ensureString(row.week_start_date),
+      week_start_date: ensureString(row.week_start_date) || deriveWeekStartDateFromLabel(row.time_period),
       metric: ensureString(row.metric),
       value: ensureString(row.value),
       unit: ensureString(row.unit),
@@ -192,7 +228,7 @@ function normalizeAnalysis(raw, run) {
       filter_type: ensureString(row.filter_type),
       filter_value: ensureString(row.filter_value),
       time_period: ensureString(row.time_period),
-      week_start_date: ensureString(row.week_start_date),
+      week_start_date: ensureString(row.week_start_date) || deriveWeekStartDateFromLabel(row.time_period),
       label: ensureString(row.label),
       text: ensureString(row.text),
       notes: ensureString(row.notes)
@@ -445,6 +481,7 @@ async function extractAxisHints({ apiKey, run, slices, workspaceName }) {
   const content = [{ type: "text", text: [
     "Read only visible weekly labels from these chart slices.",
     "Focus on labels such as YYYY-Wnn and any visible week start dates following a dash.",
+    "When a visible week label like YYYY-Wnn is present, it corresponds to the start date of that week. If the date is not printed in the chart, leave week_start_date blank and the backend will derive it deterministically.",
     "Return JSON only using this structure:",
     '{"time_hints":[{"source_file":"","page":"","filter_type":"","filter_value":"","visible_weeks":[{"week_label":"","week_start_date":"","confidence":"","notes":""}]}]}'
   ].join("\n") }];
@@ -455,7 +492,7 @@ async function extractAxisHints({ apiKey, run, slices, workspaceName }) {
   }
 
   const parsed = await callOpenAIJson({ apiKey, messages: [
-    { role: "system", content: "You read time-axis labels from dashboard chart screenshots. Extract only visible weekly labels and week start dates. Return JSON only." },
+    { role: "system", content: `You read time-axis labels from dashboard chart screenshots. Extract only visible weekly labels and week start dates. Visible year-week labels correspond to week-start dates. If a date is not printed in the chart, leave week_start_date blank instead of guessing. Return JSON only.` },
     { role: "user", content }
   ]});
 
@@ -502,8 +539,10 @@ async function extractBatchOnce({ apiKey, batch, promptText, detailMode, maxWidt
     "Return JSON only.",
     "Focus on rows visible in these images only.",
     "Use baseline screenshots as the anchor for interpreting filtered cuts under the same page or group key.",
-    "Extract visible entity names only when they are directly readable in legends, labels, tables, titles, or KPI text.",
+    `Extract visible entity names only when they are directly readable in legends, labels, tables, titles, or KPI text.`,
+    `Only allow these app names: ${ALLOWED_APP_NAMES.join(", ")}.`,
     "Never infer sibling apps, brands, or products that are not visibly present.",
+    "If a detected name is not in the allowed app list, drop it instead of normalizing it to something else.",
     "Do not mention dimensions that are not visibly present.",
     "Page grouping context:",
     JSON.stringify(pageGroups, null, 2),
@@ -518,7 +557,7 @@ async function extractBatchOnce({ apiKey, batch, promptText, detailMode, maxWidt
   }
 
   return callOpenAIJson({ apiKey, messages: [
-    { role: "system", content: "You are a meticulous BI analyst. Extract only visually supported values from the provided chart slices. Preserve baseline-vs-cut context, week labels, and visible dimensions only. Build a visible_entities allowlist from names directly visible in the images. Never infer unseen apps, brands, or products. Return JSON only." },
+    { role: "system", content: `You are a meticulous BI analyst. Extract only visually supported values from the provided chart slices. Preserve baseline-vs-cut context, week labels, and visible dimensions only. Build a visible_entities allowlist from names directly visible in the images. Only allow these app names: ${ALLOWED_APP_NAMES.join(", ")}. Never infer unseen apps, brands, or products. If a name is outside the allowed list, exclude it. Return JSON only.` },
     { role: "user", content: userContent }
   ]});
 }
@@ -587,8 +626,10 @@ async function summarizeCombinedRows({ apiKey, run, numericRows, textRows, visib
     "Rank insights by business harm, urgency, breadth, recent deterioration, competitive threat, and confidence.",
     "Top insights must be truly insight-led, not chart narration.",
     "Do not invent dimensions not present in the evidence.",
-    "Only discuss apps, brands, or products that appear in visible_entities for this run.",
+    `Only discuss apps, brands, or products that appear in visible_entities for this run. The only valid app names are: ${ALLOWED_APP_NAMES.join(", ")}.`,
     "If an entity is absent from visible_entities, treat it as out of scope and do not mention it.",
+    "Do not introduce any app name outside the approved list even if the model associates it with the category.",
+    "Use week_start_date as the calendar start date for each visible week when discussing date ranges. If a week label is visible, rely on its derived or extracted week_start_date instead of inventing a different calendar period.",
     "If later weeks are visible in time_hints, use them correctly in recent-trend commentary.",
     "Start effectively at executive summary. Avoid a long generic introductory paragraph.",
     "Return JSON only using the same top-level structure.",
@@ -599,7 +640,7 @@ async function summarizeCombinedRows({ apiKey, run, numericRows, textRows, visib
   ].join("\n");
 
   return callOpenAIJson({ apiKey, messages: [
-    { role: "system", content: "You are a BI reporting assistant. Build a concise executive report only from the extracted rows, time hints, visible_entities allowlist, and baseline-vs-cut grouping context. Only mention entities present in visible_entities for this run. Output top 4 ranked insights with recommended actions. Return JSON only." },
+    { role: "system", content: `You are a BI reporting assistant. Build a concise executive report only from the extracted rows, time hints, visible_entities allowlist, and baseline-vs-cut grouping context. Only mention entities present in visible_entities for this run, and only from this approved app list: ${ALLOWED_APP_NAMES.join(", ")}. Use week_start_date as the calendar start date for visible weeks and never substitute a stale year. Output top 4 ranked insights with recommended actions. Return JSON only.` },
     { role: "user", content: `${summaryPrompt}\n\nExtracted rows JSON:\n${JSON.stringify(compactPayload)}` }
   ]});
 }
