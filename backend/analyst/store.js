@@ -216,9 +216,10 @@ function addFileToRun({ workspaceName, runId, fileName, page, comparisonMode, fi
   const saved = saveBase64Image({ workspaceName, runId, fileName, dataUrl });
   const normalizedComparisonMode = comparisonMode === "baseline" ? "baseline" : "cut";
   const parsedName = parseStructuredFilename(fileName, page, filterType, filterValue);
+  const parsedAllZones = parsedName.normalizedFilterType === "Zone" && parsedName.normalizedFilterValue === "All";
   const resolvedPage = page || parsedName.normalizedPage || "";
-  const resolvedFilterType = filterType || parsedName.normalizedFilterType || (normalizedComparisonMode === "baseline" ? "Baseline" : "");
-  const resolvedFilterValue = filterValue || parsedName.normalizedFilterValue || (normalizedComparisonMode === "baseline" ? "Overall" : "");
+  const resolvedFilterType = parsedAllZones ? "Zone" : (filterType || parsedName.normalizedFilterType || (normalizedComparisonMode === "baseline" ? "Baseline" : ""));
+  const resolvedFilterValue = parsedAllZones ? "All" : (filterValue || parsedName.normalizedFilterValue || (normalizedComparisonMode === "baseline" ? "Overall" : ""));
   const fileRecord = {
     fileId: `file_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     fileName: fileName || saved.storedFileName,
