@@ -110,6 +110,36 @@ function buildSafeTitle(originalTitle, clientName, support) {
   return `${base} (${support.range_label})`;
 }
 
+function normalizeEntityName(value) {
+  return String(value || "").toLowerCase().trim().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ");
+}
+
+function deriveVisibleEntitySupport(analysis) {
+  const entities = Array.isArray(analysis?.visible_entities) ? analysis.visible_entities : [];
+  const unique = new Map();
+  for (const entity of entities) {
+    const key = normalizeEntityName(entity?.name);
+    if (!key) continue;
+    if (!unique.has(key)) unique.set(key, {
+      name: String(entity.name || "").trim(),
+      normalized_name: key,
+      entity_type: String(entity.entity_type || "").trim(),
+      pages: [],
+      filters: []
+    });
+    const current = unique.get(key);
+    if (entity?.page && !current.pages.includes(entity.page)) current.pages.push(entity.page);
+    const filterLabel = [entity?.filter_type, entity?.filter_value].filter(Boolean).join(": ");
+    if (filterLabel && !current.filters.includes(filterLabel)) current.filters.push(filterLabel);
+  }
+  const list = Array.from(unique.values());
+  return {
+    visible_entities: list,
+    visible_entity_names: list.map((item) => item.name),
+    visible_entity_name_set: list.map((item) => item.normalized_name)
+  };
+}
+
 router.post("/chat", async (req, res) => {
   try {
     const apiKey = process.env.OPENAI_API_KEY;
@@ -143,6 +173,8 @@ router.post("/chat", async (req, res) => {
     const filteredNumericRows = filterRowsToSupport(analysis.numeric_rows || [], authoritativeWeekSupport, "time_period");
     const filteredTextRows = filterRowsToSupport(analysis.text_rows || [], authoritativeWeekSupport, "time_period");
 
+    const visibleEntitySupport = deriveVisibleEntitySupport(analysis);
+
     const grounding = {
       runId: resolvedRun.runId,
       clientName: resolvedRun.clientName || "",
@@ -150,6 +182,9 @@ router.post("/chat", async (req, res) => {
       finishedAt: resolvedRun.finishedAt,
       authoritative_visible_weeks: authoritativeWeekSupport,
       authoritative_supported_week_labels: authoritativeWeekSupport?.labels || [],
+      visible_entities: visibleEntitySupport.visible_entities,
+      visible_entity_names: visibleEntitySupport.visible_entity_names,
+      visible_entity_name_set: visibleEntitySupport.visible_entity_name_set,
       time_hints: filteredTimeHints,
       numeric_rows: filteredNumericRows,
       text_rows: filteredTextRows,
@@ -169,7 +204,7 @@ router.post("/chat", async (req, res) => {
         messages: [
           {
             role: "system",
-            content: "You answer only from the supplied extracted dashboard data for the selected run. Treat authoritative_visible_weeks and authoritative_supported_week_labels as the highest-priority evidence for time windows. If older or conflicting year-week labels fall outside authoritative_visible_weeks, treat them as stale extraction noise and ignore them. Never say a week is unavailable if it appears in authoritative_supported_week_labels. Use top_insights as primary grounding when relevant. Use baseline vs filtered-cut comparisons when discussing what is hurting the business. Never hallucinate missing dimensions such as categories. If exact values are unavailable but the direction of risk is visible, say so clearly."
+            content: "You answer only from the supplied extracted dashboard data for the selected run. Treat authoritative_visible_weeks and authoritative_supported_week_labels as the highest-priority evidence for time windows. If older or conflicting year-week labels fall outside authoritative_visible_weeks, treat them as stale extraction noise and ignore them. Never say a week is unavailable if it appears in authoritative_supported_week_labels. Only discuss apps, brands, or products whose normalized names appear in visible_entity_name_set. If the question asks about an entity outside visible_entity_name_set, say it is not visibly present in the uploaded screenshots for this run. Use top_insights as primary grounding when relevant. Use baseline vs filtered-cut comparisons when discussing what is hurting the business. Never hallucinate missing dimensions such as categories. If exact values are unavailable but the direction of risk is visible, say so clearly."
           },
           { role: "user", content: `Grounding JSON:\n${JSON.stringify(grounding, null, 2)}\n\nQuestion: ${String(question).trim()}` }
         ]
